@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aix-machine-config-operator
+  namespace: aix-machine-config-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aix-machine-config-operator
+rules:
+# Node registration (role label), desiredConfig annotations, cordon/uncordon.
+- apiGroups: [""]
+  resources: [nodes]
+  verbs: [get, list, watch, patch, update]
+# Draining.
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, list, delete]
+- apiGroups: [""]
+  resources: [pods/eviction]
+  verbs: [create]
+- apiGroups: [apps]
+  resources: [daemonsets, replicasets, statefulsets]
+  verbs: [get]
+- apiGroups: [""]
+  resources: [replicationcontrollers]
+  verbs: [get]
+# Own API.
+- apiGroups: [amco.reuna-labs.io]
+  resources: [aixconfigpools]
+  verbs: [get, list, watch]
+- apiGroups: [amco.reuna-labs.io]
+  resources: [aixconfigpools/status]
+  verbs: [update]
+# Inputs (read only): the same objects the stock MCO renders from.
+- apiGroups: [machineconfiguration.openshift.io]
+  resources: [controllerconfigs, kubeletconfigs, containerruntimeconfigs]
+  verbs: [get, list, watch]
+- apiGroups: [config.openshift.io]
+  resources: [images, apiservers, imagedigestmirrorsets, imagetagmirrorsets]
+  verbs: [get, list, watch]
+- apiGroups: [""]
+  resources: [events]
+  verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aix-machine-config-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aix-machine-config-operator
+subjects:
+- kind: ServiceAccount
+  name: aix-machine-config-operator
+  namespace: aix-machine-config-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aix-machine-config-operator
+  namespace: aix-machine-config-operator
+rules:
+# Rendered configs.
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [get, list, watch, create, delete]
+# Leader election.
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, create, update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aix-machine-config-operator
+  namespace: aix-machine-config-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aix-machine-config-operator
+subjects:
+- kind: ServiceAccount
+  name: aix-machine-config-operator
+  namespace: aix-machine-config-operator

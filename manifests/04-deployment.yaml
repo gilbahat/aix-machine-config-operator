@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aix-machine-config-operator
+  namespace: aix-machine-config-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aix-machine-config-operator
+  template:
+    metadata:
+      labels:
+        app: aix-machine-config-operator
+    spec:
+      serviceAccountName: aix-machine-config-operator
+      nodeSelector:
+        kubernetes.io/os: linux
+        node-role.kubernetes.io/master: ""
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      priorityClassName: system-cluster-critical
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: operator
+        # Replace with the image built by `make image`.
+        image: quay.io/example/aix-machine-config-operator:latest
+        args: [start, --v=2]
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        resources:
+          requests:
+            cpu: 10m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop: [ALL]

@@ -1,0 +1,64 @@
+# Identity of the node agent running on AIX nodes. The agent is not a pod, so
+# it authenticates with a long-lived token (hack/agent-kubeconfig.sh).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: amco-agent
+  namespace: aix-machine-config-operator
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: amco-agent-token
+  namespace: aix-machine-config-operator
+  annotations:
+    kubernetes.io/service-account.name: amco-agent
+type: kubernetes.io/service-account-token
+---
+# The agent watches and annotates its own Node. RBAC cannot narrow this to
+# one node per token (the machine-config-daemon has the same reach).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: amco-agent
+rules:
+- apiGroups: [""]
+  resources: [nodes]
+  verbs: [get, list, watch, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: amco-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: amco-agent
+subjects:
+- kind: ServiceAccount
+  name: amco-agent
+  namespace: aix-machine-config-operator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: amco-agent
+  namespace: aix-machine-config-operator
+rules:
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: amco-agent
+  namespace: aix-machine-config-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: amco-agent
+subjects:
+- kind: ServiceAccount
+  name: amco-agent
+  namespace: aix-machine-config-operator
