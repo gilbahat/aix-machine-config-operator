@@ -49,8 +49,10 @@ func (d *kubectlDrainer) helper(ctx context.Context) *drain.Helper {
 	}
 }
 
+// Cordon works on a copy: kubectl's cordon helper writes into the Node it is
+// given, which is usually an informer cache object.
 func (d *kubectlDrainer) Cordon(ctx context.Context, node *corev1.Node, cordon bool) error {
-	return drain.RunCordonOrUncordon(d.helper(ctx), node, cordon)
+	return drain.RunCordonOrUncordon(d.helper(ctx), node.DeepCopy(), cordon)
 }
 
 func (d *kubectlDrainer) Drain(ctx context.Context, node string) error {

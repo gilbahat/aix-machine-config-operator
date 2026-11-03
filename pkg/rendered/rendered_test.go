@@ -14,7 +14,7 @@ func cfg(files ...File) *Config {
 var (
 	hosts   = File{Path: "/etc/containerd/certs.d/quay.io/hosts.toml", Mode: 0o644, Contents: "a", Group: GroupRegistries}
 	kubelet = File{Path: "/etc/kubernetes/kubelet.conf", Mode: 0o644, Contents: "k", Group: GroupKubelet}
-	trust   = File{Path: "/var/ssl/certs/amco.pem", Mode: 0o644, Contents: "t", Group: GroupTrust}
+	trust   = File{Path: "/var/ssl/certs/amco-trust.pem", Mode: 0o644, Contents: "t", Group: GroupTrust}
 )
 
 func TestDiffRegistriesOnlyIsLive(t *testing.T) {
@@ -46,8 +46,11 @@ func TestValidate(t *testing.T) {
 	for _, f := range []File{
 		{Path: "relative", Group: GroupRegistries},
 		{Path: "/etc/../etc/x", Group: GroupRegistries},
-		{Path: "/x", Group: "nope"},
-		{Path: "/x", Mode: 0o10000, Group: GroupRegistries},
+		{Path: "/etc/containerd/certs.d/q/hosts.toml", Group: "nope"},
+		{Path: "/etc/containerd/certs.d/q/hosts.toml", Mode: 0o4755, Group: GroupRegistries},
+		{Path: "/etc/amco/kubeconfig", Group: GroupRegistries},
+		{Path: "/etc/containerd/hosts.toml", Group: GroupRegistries},
+		{Path: "/etc/containerd/certs.d/", Group: GroupRegistries},
 	} {
 		assert.Error(t, cfg(f).Validate(), f.Path)
 	}

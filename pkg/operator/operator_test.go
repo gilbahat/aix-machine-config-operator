@@ -18,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes/fake"
@@ -55,6 +56,9 @@ type fakeDrainer struct {
 	h        *harness
 	drained  []string
 	drainErr error
+	// onDrain runs inside Drain, to simulate syncs that happen while a
+	// drain is in progress.
+	onDrain func()
 }
 
 func (d *fakeDrainer) Cordon(ctx context.Context, node *corev1.Node, cordon bool) error {
@@ -69,6 +73,9 @@ func (d *fakeDrainer) Cordon(ctx context.Context, node *corev1.Node, cordon bool
 
 func (d *fakeDrainer) Drain(_ context.Context, node string) error {
 	d.drained = append(d.drained, node)
+	if d.onDrain != nil {
+		d.onDrain()
+	}
 	return d.drainErr
 }
 
@@ -179,7 +186,7 @@ func aixNode(name string, extraLabels ...string) *corev1.Node {
 		l[x] = ""
 	}
 	return &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: l, Annotations: map[string]string{}},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: l, Annotations: map[string]string{nodestate.AgentVersionAnnotation: "test"}},
 		Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}},
 	}
 }
@@ -396,4 +403,102 @@ func TestMaxUnavailable(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, tc.want, got)
 	}
+}
+
+func TestSyncDuringDrainKeepsNodeCordoned(t *testing.T) {
+	h := newHarness(t, aixNode("aix1"), aixNode("aix2"))
+	h.addPool(defaultPool())
+	updateAll(h, "aix", "aix1", "aix2")
+
+	// A kubelet change needs a drain; syncs that run while it drains (the
+	// cordon and annotation patches trigger them) must not uncordon.
+	kc := &mcfgv1.KubeletConfig{ObjectMeta: metav1.ObjectMeta{Name: "pods"}, Spec: mcfgv1.KubeletConfigSpec{
+		MachineConfigPoolSelector: &metav1.LabelSelector{},
+		KubeletConfig:             &runtime.RawExtension{Raw: []byte(`{"maxPods": 99}`)},
+	}}
+	kcs := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, kcs.Add(kc))
+	h.op.kcLister = mcfglisters.NewKubeletConfigLister(kcs)
+
+	var during []*corev1.Node
+	h.drainer.onDrain = func() {
+		h.refresh()
+		_, err := h.op.syncPool(context.Background(), "aix")
+		require.NoError(t, err)
+		h.refresh()
+		during = append(during, h.node("aix1"))
+	}
+	h.sync("aix")
+	target := h.pool("aix").Status.RenderedConfig
+	require.Len(t, during, 1)
+	assert.True(t, during[0].Spec.Unschedulable, "node stays cordoned while it drains")
+	assert.Equal(t, target, during[0].Annotations[nodestate.CordonedByAnnotation])
+	assert.NotEqual(t, target, nodestate.Desired(h.node("aix2")), "the second node waits for the first")
+
+	h.drainer.onDrain = nil
+	h.agentApplies("aix1")
+	h.sync("aix")
+	assert.False(t, h.node("aix1").Spec.Unschedulable)
+	assert.Equal(t, target, nodestate.Desired(h.node("aix2")))
+}
+
+func TestDrainFailureSurvivesOtherPoolSyncs(t *testing.T) {
+	h := newHarness(t, aixNode("aix1"), aixNode("db1"))
+	n := h.node("db1")
+	delete(n.Labels, nodestate.RoleLabel)
+	n.Labels["tier"] = "db"
+	_, err := h.kube.CoreV1().Nodes().Update(context.Background(), n, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	h.refresh()
+	h.addPool(defaultPool())
+	h.addPool(&amcov1alpha1.AIXConfigPool{ObjectMeta: metav1.ObjectMeta{Name: "db"}, Spec: amcov1alpha1.AIXConfigPoolSpec{
+		NodeSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"tier": "db"}},
+	}})
+	h.drainer.drainErr = errors.New("PDB")
+	h.sync("aix")
+	h.sync("db")
+	h.sync("aix")
+	assert.Equal(t, []string{"aix1", "db1"}, h.drainer.drained, "no retry before the interval, whatever other pools do")
+	assert.Contains(t, cond(h.pool("aix"), amcov1alpha1.ConditionNodeDegraded).Message, "node aix1: drain failed")
+	assert.NotContains(t, cond(h.pool("aix"), amcov1alpha1.ConditionNodeDegraded).Message, "db1")
+}
+
+func TestNodeWithoutAgentIsNotTouched(t *testing.T) {
+	n := aixNode("aix1")
+	delete(n.Annotations, nodestate.AgentVersionAnnotation)
+	h := newHarness(t, n)
+	h.addPool(defaultPool())
+	h.sync("aix")
+	assert.Empty(t, nodestate.Desired(h.node("aix1")))
+	assert.False(t, h.node("aix1").Spec.Unschedulable)
+	assert.Empty(t, h.drainer.drained)
+	assert.Contains(t, strings.Join(h.pool("aix").Status.Warnings, "\n"), "no amco-agent has reported in yet")
+}
+
+func TestOrphanedCordonIsReleased(t *testing.T) {
+	h := newHarness(t, aixNode("aix1"))
+	h.addPool(defaultPool())
+	h.drainer.drainErr = errors.New("PDB")
+	h.sync("aix")
+	require.True(t, h.node("aix1").Spec.Unschedulable)
+
+	// The node leaves the pool before its update finished.
+	n := h.node("aix1")
+	delete(n.Labels, nodestate.RoleLabel)
+	_, err := h.kube.CoreV1().Nodes().Update(context.Background(), n, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	h.refresh()
+	_, err = h.op.syncNode(context.Background(), "aix1")
+	require.NoError(t, err)
+	// syncNode re-adds the role label (the node is still AIX); with it the
+	// node is back in its pool, so it stays cordoned for the retry.
+	assert.True(t, h.node("aix1").Spec.Unschedulable)
+
+	// Deleting the pool releases it.
+	require.NoError(t, h.pools.Delete(defaultPool()))
+	h.refresh()
+	_, err = h.op.syncNode(context.Background(), "aix1")
+	require.NoError(t, err)
+	assert.False(t, h.node("aix1").Spec.Unschedulable)
+	assert.NotContains(t, h.node("aix1").Annotations, nodestate.CordonedByAnnotation)
 }

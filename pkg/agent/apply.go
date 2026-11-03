@@ -35,10 +35,30 @@ const (
 // last managed file in them (one per registry host).
 var pruneDirs = []string{"/etc/containerd/certs.d"}
 
-// Applied is the persisted record of the last applied config.
+// Applied is the persisted record of what the agent wrote. Config is the last
+// config applied in full (files and restarts); Pending is set while an apply
+// is in progress, so a failed or interrupted apply is redone in full.
 type Applied struct {
-	Name   string           `json:"name"`
-	Config *rendered.Config `json:"config"`
+	Name    string           `json:"name"`
+	Config  *rendered.Config `json:"config,omitempty"`
+	Pending *rendered.Config `json:"pending,omitempty"`
+}
+
+// Owned returns the files the agent may have written, by path.
+func (a *Applied) Owned() map[string]rendered.File {
+	out := map[string]rendered.File{}
+	if a == nil {
+		return out
+	}
+	for _, c := range []*rendered.Config{a.Config, a.Pending} {
+		if c == nil {
+			continue
+		}
+		for _, f := range c.Files {
+			out[f.Path] = f
+		}
+	}
+	return out
 }
 
 // Host writes files under Root (normally "/"; tests and dry runs use a
@@ -62,11 +82,16 @@ func (h Host) LoadApplied() (*Applied, error) {
 	if err := json.Unmarshal(data, a); err != nil {
 		return nil, fmt.Errorf("decoding %s: %w", StateFile, err)
 	}
-	if a.Config == nil {
+	if a.Config == nil && a.Pending == nil {
 		return nil, fmt.Errorf("%s has no config", StateFile)
 	}
-	if err := a.Config.Validate(); err != nil {
-		return nil, fmt.Errorf("%s: %w", StateFile, err)
+	for _, c := range []*rendered.Config{a.Config, a.Pending} {
+		if c == nil {
+			continue
+		}
+		if err := c.Validate(); err != nil {
+			return nil, fmt.Errorf("%s: %w", StateFile, err)
+		}
 	}
 	return a, nil
 }
@@ -100,9 +125,9 @@ func (h Host) ClearForce() error {
 // be overwritten is backed up first. The caller records the applied config
 // with SaveApplied once the services have been restarted, so a failed restart
 // is retried with the same plan.
-func (h Host) Apply(plan rendered.Plan, owned map[string]bool) error {
+func (h Host) Apply(plan rendered.Plan, owned map[string]rendered.File) error {
 	for _, f := range plan.Write {
-		if !owned[f.Path] {
+		if _, ok := owned[f.Path]; !ok {
 			if err := h.backup(f.Path, f.Contents); err != nil {
 				return err
 			}
@@ -152,12 +177,18 @@ func (h Host) writeFile(p string, data []byte, mode os.FileMode) error {
 	if err := os.Rename(tmp.Name(), full); err != nil {
 		return fmt.Errorf("replacing %s: %w", p, err)
 	}
+	// Persist the rename; not every filesystem supports syncing a directory.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
 	return nil
 }
 
 // backup keeps a copy of a file that existed before AMCO managed it. A file
 // that already has the new contents was written by an earlier, interrupted
-// apply and is not backed up.
+// apply and is not backed up. A backup left over from an earlier takeover is
+// replaced: the file was changed after AMCO let go of it.
 func (h Host) backup(p, newContents string) error {
 	full := h.path(p)
 	data, err := os.ReadFile(full)
@@ -168,9 +199,6 @@ func (h Host) backup(p, newContents string) error {
 		return err
 	}
 	if string(data) == newContents {
-		return nil
-	}
-	if _, err := os.Stat(full + BackupSuffix); err == nil {
 		return nil
 	}
 	st, err := os.Stat(full)

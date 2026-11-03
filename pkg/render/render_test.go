@@ -108,11 +108,22 @@ func TestRenderMirrors(t *testing.T) {
 	assert.Contains(t, hub, `[host."https://hub-mirror.example.com"]`)
 	assert.Contains(t, hub, `capabilities = ["pull", "resolve"]`)
 
-	assert.Contains(t, fs["/etc/containerd/certs.d/insecure.example.com/hosts.toml"].Contents, "skip_verify = true")
+	insecure := fs["/etc/containerd/certs.d/insecure.example.com/hosts.toml"].Contents
+	assert.Contains(t, insecure, `server = "http://insecure.example.com"`)
+	assert.Contains(t, insecure, "skip_verify = true")
 
 	joined := strings.Join(res.Warnings, "\n")
 	assert.Contains(t, joined, "ocp-v4.0-art-dev")
 	assert.Contains(t, joined, `blocked registry "blocked.example.com" is not enforced`)
+	assert.Contains(t, joined, `mirrors of "quay.io/openshift-release-dev/ocp-release" apply to every repository on quay.io`)
+}
+
+func TestRenderRejectsBadHosts(t *testing.T) {
+	for _, scope := range []string{"..", "../etc", "-x.example.com"} {
+		img := &configv1.Image{Spec: configv1.ImageSpec{RegistrySources: configv1.RegistrySources{InsecureRegistries: []string{scope}}}}
+		_, err := Render(Inputs{Pool: testPool(), ControllerConfig: testCC(), Image: img})
+		assert.Error(t, err, scope)
+	}
 }
 
 func TestRenderRejectsInvalidScopes(t *testing.T) {

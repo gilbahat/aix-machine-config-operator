@@ -49,6 +49,11 @@ func (o *Operator) computeStatus(st *poolSync) amcov1alpha1.AIXConfigPoolStatus 
 	sort.Strings(degraded)
 
 	status.Warnings = append([]string(nil), st.warnings...)
+	for _, n := range st.nodes {
+		if !nodestate.HasAgent(n) {
+			status.Warnings = append(status.Warnings, fmt.Sprintf("node %s: no amco-agent has reported in yet; it is not updated until one does", n.Name))
+		}
+	}
 	for _, n := range workerLabelled(st.nodes) {
 		status.Warnings = append(status.Warnings, fmt.Sprintf("node %s carries %s; the stock MCO's worker pool will select it and wait for a machine-config-daemon that never runs on AIX. Remove the label.", n, nodestate.WorkerRoleLabel))
 	}

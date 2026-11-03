@@ -1,0 +1,53 @@
+# Limits what the amco-agent service account can change on Node objects.
+# RBAC can only grant "patch nodes" as a whole, so without this policy a
+# token stolen from one AIX node could remove taints, uncordon nodes or fake
+# another node's update state. With it, the agent may only change its own
+# reporting annotations (currentConfig, state, reason, agentVersion, osLevel);
+# spec (cordon, taints), labels and every other annotation stay as they were.
+#
+# All AIX nodes share one token, so this does not stop one node's agent from
+# writing another AIX node's annotations. Issue one token per node and bind
+# the node name in a matchCondition if that matters in your environment.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: amco-agent-node-updates
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["UPDATE"]
+      resources: ["nodes"]
+  matchConditions:
+  - name: is-amco-agent
+    expression: request.userInfo.username == 'system:serviceaccount:aix-machine-config-operator:amco-agent'
+  variables:
+  - name: allowed
+    expression: >-
+      ['amco.reuna-labs.io/currentConfig', 'amco.reuna-labs.io/state', 'amco.reuna-labs.io/reason',
+       'amco.reuna-labs.io/agentVersion', 'amco.reuna-labs.io/osLevel']
+  - name: newAnn
+    expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
+  - name: oldAnn
+    expression: "has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}"
+  validations:
+  - expression: object.spec == oldObject.spec
+    message: amco-agent may not change a node's spec
+  - expression: >-
+      (has(object.metadata.labels) ? object.metadata.labels : {}) ==
+      (has(oldObject.metadata.labels) ? oldObject.metadata.labels : {})
+    message: amco-agent may not change node labels
+  - expression: >-
+      variables.newAnn.all(k, k in variables.allowed || (k in variables.oldAnn && variables.oldAnn[k] == variables.newAnn[k])) &&
+      variables.oldAnn.all(k, k in variables.allowed || k in variables.newAnn)
+    message: amco-agent may only change its own reporting annotations
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: amco-agent-node-updates
+spec:
+  policyName: amco-agent-node-updates
+  validationActions: [Deny]

@@ -89,6 +89,34 @@ type Config struct {
 	Files   []File `json:"files"`
 }
 
+// managedFiles and managedPrefixes are the only places a rendered config may
+// write. The agent runs as root, so this list (not the operator) is what
+// bounds what a rendered config can do to a node.
+var (
+	managedFiles = map[string]bool{
+		"/etc/kubernetes/kubelet.conf":   true,
+		"/etc/kubernetes/kubelet-ca.crt": true,
+	}
+	managedPrefixes = []string{
+		"/etc/containerd/certs.d/",
+		"/etc/containerd/conf.d/",
+		"/var/ssl/certs/amco-",
+	}
+)
+
+// IsManagedPath reports whether a rendered config may write p.
+func IsManagedPath(p string) bool {
+	if managedFiles[p] {
+		return true
+	}
+	for _, pre := range managedPrefixes {
+		if strings.HasPrefix(p, pre) && len(p) > len(pre) {
+			return true
+		}
+	}
+	return false
+}
+
 // Validate checks the structural rules the agent relies on.
 func (c *Config) Validate() error {
 	if c.Version != FormatVersion {
@@ -99,12 +127,15 @@ func (c *Config) Validate() error {
 		if !path.IsAbs(f.Path) || path.Clean(f.Path) != f.Path || f.Path == "/" {
 			return fmt.Errorf("file path %q must be absolute and clean", f.Path)
 		}
+		if !IsManagedPath(f.Path) {
+			return fmt.Errorf("file path %q is outside the locations AMCO manages", f.Path)
+		}
 		if seen[f.Path] {
 			return fmt.Errorf("file %q listed twice", f.Path)
 		}
 		seen[f.Path] = true
-		if f.Mode&^0o7777 != 0 {
-			return fmt.Errorf("file %q has invalid mode %o", f.Path, f.Mode)
+		if f.Mode&^0o777 != 0 {
+			return fmt.Errorf("file %q has invalid mode %o (only permission bits are allowed)", f.Path, f.Mode)
 		}
 		if _, ok := Policies[f.Group]; !ok {
 			return fmt.Errorf("file %q has unknown group %q", f.Path, f.Group)
@@ -197,10 +228,18 @@ func Diff(from, to *Config) Plan {
 			}
 		}
 	}
+	p.Drain, p.Restart = PolicyFor(groups)
+	sort.Strings(p.Remove)
+	return p
+}
+
+// PolicyFor combines the policies of the changed groups: whether a drain is
+// needed and which subsystems to restart, in restart order.
+func PolicyFor(groups map[Group]bool) (drain bool, restartOrder []string) {
 	restart := map[string]bool{}
 	for g := range groups {
 		pol := Policies[g]
-		p.Drain = p.Drain || pol.Drain
+		drain = drain || pol.Drain
 		for _, s := range pol.Restart {
 			restart[s] = true
 		}
@@ -208,7 +247,7 @@ func Diff(from, to *Config) Plan {
 	// containerd before the kubelet, so the kubelet reconnects to a running runtime.
 	for _, s := range []string{SubsystemContainerd, SubsystemKubelet} {
 		if restart[s] {
-			p.Restart = append(p.Restart, s)
+			restartOrder = append(restartOrder, s)
 			delete(restart, s)
 		}
 	}
@@ -217,9 +256,7 @@ func Diff(from, to *Config) Plan {
 		rest = append(rest, s)
 	}
 	sort.Strings(rest)
-	p.Restart = append(p.Restart, rest...)
-	sort.Strings(p.Remove)
-	return p
+	return drain, append(restartOrder, rest...)
 }
 
 // String summarizes the plan for logs and events.

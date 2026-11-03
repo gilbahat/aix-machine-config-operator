@@ -40,20 +40,25 @@ func (o *Operator) syncPool(ctx context.Context, name string) (time.Duration, er
 
 	st := poolSync{pool: pool, nodes: members, conflicts: conflicts}
 	st.target = pool.Status.RenderedConfig
+	var storeErr error
 	if res, err := o.render(pool); err != nil {
 		st.renderErr = err
 	} else {
 		st.warnings = res.Warnings
 		target, err := o.ensureRendered(ctx, pool, res.Config)
 		if err != nil {
-			return 0, err
+			st.renderErr, storeErr = err, err
+		} else {
+			st.target = target
 		}
-		st.target = target
 	}
 
 	requeue, rollErr := o.rollout(ctx, &st)
 	if err := o.updateStatus(ctx, &st); err != nil {
 		return 0, err
+	}
+	if storeErr != nil {
+		return 0, storeErr
 	}
 	if err := o.gcRendered(ctx, pool, st.target); err != nil {
 		klog.Warningf("pool %s: garbage-collecting rendered configs: %v", pool.Name, err)
@@ -126,8 +131,15 @@ func (o *Operator) poolMembers(pool *amcov1alpha1.AIXConfigPool) ([]*corev1.Node
 	return members, conflicts, nil
 }
 
+// maxPoolNameLength keeps the pool name usable as a label value, which the
+// rendered ConfigMaps carry.
+const maxPoolNameLength = 63
+
 // render gathers the pool's inputs from the listers and renders them.
 func (o *Operator) render(pool *amcov1alpha1.AIXConfigPool) (*render.Result, error) {
+	if len(pool.Name) > maxPoolNameLength {
+		return nil, fmt.Errorf("pool name %q is longer than %d characters", pool.Name, maxPoolNameLength)
+	}
 	in := render.Inputs{Pool: pool}
 	cc, err := o.ccLister.Get(ctrlcommon.ControllerConfigName)
 	if err != nil {

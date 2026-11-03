@@ -73,6 +73,9 @@ func renderRegistries(cc *mcfgv1.ControllerConfig, img *configv1.Image, idms []*
 			continue
 		}
 		host, repo := splitScope(scope)
+		if !registryHostRE.MatchString(host) {
+			return nil, nil, fmt.Errorf("registry scope %q does not start with a valid host[:port]", scope)
+		}
 		h := get(host)
 		if reg.Insecure {
 			h.skipVerify = true
@@ -87,7 +90,13 @@ func renderRegistries(cc *mcfgv1.ControllerConfig, img *configv1.Image, idms []*
 				h.neverContactSource = true
 			}
 		}
+		if repo != "" && len(reg.Mirrors) > 0 {
+			warnings = append(warnings, fmt.Sprintf("mirrors of %q apply to every repository on %s on AIX nodes (containerd mirrors are per host); images a mirror does not have are pulled from %s", scope, host, host))
+		}
 		for _, m := range reg.Mirrors {
+			if mh, _ := splitScope(m.Location); !registryHostRE.MatchString(mh) {
+				return nil, nil, fmt.Errorf("mirror %q of %q does not start with a valid host[:port]", m.Location, scope)
+			}
 			e, err := mirrorEntry(repo, m, reg.MirrorByDigestOnly)
 			if err != nil {
 				warnings = append(warnings, fmt.Sprintf("mirror %q of %q: %v; ignored on AIX nodes", m.Location, scope, err))
@@ -143,7 +152,7 @@ func mirrorEntry(repo string, m sysregistriesv2.Endpoint, byDigestOnly bool) (ho
 			return hostEntry{}, fmt.Errorf("containerd cannot map repository %q to mirror path %q (a mirror may only add a path prefix)", repo, mpath)
 		}
 	}
-	e := hostEntry{url: "https://" + mhost, skipVerify: m.Insecure, capabilities: []string{"pull", "resolve"}}
+	e := hostEntry{url: scheme(m.Insecure) + mhost, skipVerify: m.Insecure, capabilities: []string{"pull", "resolve"}}
 	if prefix != "" {
 		e.url += "/v2/" + prefix
 		e.overridePath = true
@@ -199,13 +208,24 @@ func (h *hostConfig) addMirror(e hostEntry) {
 	h.mirrors = append(h.mirrors, e)
 }
 
+// scheme returns the URL scheme for a host entry. An insecure registry in
+// OpenShift may speak plain HTTP or unverified TLS; containerd tries HTTPS
+// first and falls back to HTTP only for an "http://" host with TLS settings
+// (skip_verify), which is how insecure entries are written.
+func scheme(insecure bool) string {
+	if insecure {
+		return "http://"
+	}
+	return "https://"
+}
+
 // serverURL is the registry's own endpoint. Docker Hub's API lives on a
 // different host from its image names, as in containerd's defaults.
 func (h *hostConfig) serverURL() string {
 	if h.host == "docker.io" {
-		return "https://registry-1.docker.io"
+		return scheme(h.skipVerify) + "registry-1.docker.io"
 	}
-	return "https://" + h.host
+	return scheme(h.skipVerify) + h.host
 }
 
 func (h *hostConfig) toml() string {

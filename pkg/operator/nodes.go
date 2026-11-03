@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 
@@ -36,11 +37,61 @@ func (o *Operator) syncNode(ctx context.Context, name string) (time.Duration, er
 	if !nodestate.IsAIX(node) {
 		return 0, nil
 	}
-	if _, ok := node.Labels[nodestate.RoleLabel]; ok {
-		return 0, nil
+	if _, ok := node.Labels[nodestate.RoleLabel]; !ok {
+		klog.Infof("registering AIX node %s with role label %s", node.Name, nodestate.RoleLabel)
+		if err := o.patchNodeMeta(ctx, node.Name, map[string]interface{}{"labels": map[string]interface{}{nodestate.RoleLabel: ""}}); err != nil {
+			return 0, err
+		}
+		node = node.DeepCopy()
+		node.Labels[nodestate.RoleLabel] = ""
 	}
-	klog.Infof("registering AIX node %s with role label %s", node.Name, nodestate.RoleLabel)
-	return 0, o.patchNodeMeta(ctx, node.Name, map[string]interface{}{"labels": map[string]interface{}{nodestate.RoleLabel: ""}})
+	return 0, o.releaseOrphanedCordon(ctx, node)
+}
+
+// releaseOrphanedCordon uncordons a node AMCO cordoned that no pool manages
+// any more (it was relabelled, its pool was deleted, or two pools now select
+// it), since no pool sync would ever finish its update.
+func (o *Operator) releaseOrphanedCordon(ctx context.Context, node *corev1.Node) error {
+	if node.Annotations[nodestate.CordonedByAnnotation] == "" || o.draining(node.Name) {
+		return nil
+	}
+	pools, err := o.poolsSelecting(node)
+	if err != nil {
+		return err
+	}
+	if len(pools) == 1 {
+		return nil
+	}
+	klog.Infof("node %s was cordoned by AMCO but is selected by %d pools; uncordoning", node.Name, len(pools))
+	return o.uncordon(ctx, node)
+}
+
+// poolsSelecting returns the names of the pools whose selector matches node.
+func (o *Operator) poolsSelecting(node *corev1.Node) ([]string, error) {
+	var out []string
+	for _, p := range o.listPools() {
+		sel, err := poolSelector(p)
+		if err != nil {
+			continue
+		}
+		if sel.Matches(labels.Set(node.Labels)) {
+			out = append(out, p.Name)
+		}
+	}
+	return out, nil
+}
+
+func (o *Operator) enqueueAIXNodes() {
+	if o.nodeLister == nil {
+		return
+	}
+	nodes, err := o.nodeLister.List(labels.SelectorFromSet(labels.Set{nodestate.OSLabel: nodestate.OSAIX}))
+	if err != nil {
+		return
+	}
+	for _, n := range nodes {
+		o.nodeQueue.Add(n.Name)
+	}
 }
 
 // patchNodeMeta merge-patches a node's metadata; a nil value removes the key.

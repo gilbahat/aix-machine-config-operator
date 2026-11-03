@@ -41,6 +41,7 @@ import (
 
 	amcov1alpha1 "github.com/gilbahat/aix-machine-config-operator/pkg/apis/amco/v1alpha1"
 	"github.com/gilbahat/aix-machine-config-operator/pkg/client"
+	"github.com/gilbahat/aix-machine-config-operator/pkg/nodestate"
 	"github.com/gilbahat/aix-machine-config-operator/pkg/rendered"
 )
 
@@ -145,6 +146,14 @@ func New(cfg Config, kube kubernetes.Interface, configClient configclient.Interf
 		UpdateFunc: func(interface{}, interface{}) { o.enqueueAllPools() },
 		DeleteFunc: func(interface{}) { o.enqueueAllPools() },
 	}
+	poolChanged := cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(interface{}) { o.enqueueAIXNodes() },
+		UpdateFunc: func(interface{}, interface{}) { o.enqueueAIXNodes() },
+		DeleteFunc: func(interface{}) { o.enqueueAIXNodes() },
+	}
+	if _, err := poolInf.AddEventHandler(poolChanged); err != nil {
+		utilruntime.HandleError(err)
+	}
 	for _, inf := range []cache.SharedIndexInformer{
 		cms.Informer(), ccs.Informer(), kcs.Informer(), crcs.Informer(),
 		images.Informer(), apiServers.Informer(), idms.Informer(), itms.Informer(), poolInf,
@@ -227,7 +236,7 @@ func (o *Operator) work(ctx context.Context, q workqueue.TypedRateLimitingInterf
 
 func (o *Operator) onNode(obj interface{}) {
 	node, ok := obj.(*corev1.Node)
-	if !ok {
+	if !ok || !nodestate.IsAIX(node) {
 		return
 	}
 	o.nodeQueue.Add(node.Name)
