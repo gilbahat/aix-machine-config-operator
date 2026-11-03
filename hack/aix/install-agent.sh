@@ -10,7 +10,8 @@
 #   -b  amco-agent binary built with `make agent-aix`
 #   -k  kubeconfig for the amco-agent service account
 #       (create it with hack/agent-kubeconfig.sh)
-#   -n  Kubernetes node name (default: short hostname, lower case)
+#   -n  Kubernetes node name (default: the hostname in lower case, as the
+#       kubelet registers it; pass the kubelet's --hostname-override if set)
 #   -u  uninstall (stops and removes the subsystem; files are left in place)
 #
 # Everything after "--" is appended to the agent arguments, e.g. "-- --v=4".
@@ -26,7 +27,7 @@ GROUP=kubernetes
 
 binary=""
 kubeconfig=""
-node=$(hostname | cut -d. -f1 | tr '[:upper:]' '[:lower:]')
+node=$(hostname | tr '[:upper:]' '[:lower:]')
 uninstall=0
 while getopts "b:k:n:u" opt; do
 	case $opt in

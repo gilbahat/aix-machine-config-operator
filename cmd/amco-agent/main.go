@@ -105,9 +105,10 @@ func (s srcRestarter) Restart(ctx context.Context, name string) error {
 func run(args []string) error {
 	var c commonFlags
 	fs := newFlagSet("run", &c)
+	// The kubelet registers the node as the lower-cased os.Hostname().
 	host, _ := os.Hostname()
 	kubeconfig := fs.String("kubeconfig", "/etc/amco/kubeconfig", "kubeconfig of the amco-agent service account")
-	nodeName := fs.String("node-name", strings.ToLower(strings.SplitN(host, ".", 2)[0]), "name of this node (the kubelet's --hostname-override, if any)")
+	nodeName := fs.String("node-name", strings.ToLower(host), "name of this node (the kubelet's --hostname-override, if any)")
 	namespace := fs.String("namespace", "aix-machine-config-operator", "namespace of the rendered configs")
 	interval := fs.Duration("interval", time.Minute, "how often to check for drift and retry failed applies")
 	_ = fs.Parse(args)
@@ -157,6 +158,7 @@ func apply(args []string) error {
 	var c commonFlags
 	fs := newFlagSet("apply", &c)
 	file := fs.String("f", "", "rendered config JSON (output of aix-machine-config-operator render)")
+	full := fs.Bool("full", false, "rewrite every file and restart every affected service, not just what changed")
 	_ = fs.Parse(args)
 	if *file == "" {
 		return fmt.Errorf("apply: -f is required")
@@ -178,13 +180,9 @@ func apply(args []string) error {
 		return err
 	}
 	host := agent.Host{Root: c.root}
-	applied, err := host.LoadApplied()
-	if err != nil {
-		return err
-	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
-	if err := agent.ApplyConfig(ctx, host, restarter, name, cfg, applied); err != nil {
+	if err := agent.ApplyConfig(ctx, host, restarter, name, cfg, *full); err != nil {
 		return err
 	}
 	klog.Infof("applied %s under %s", name, c.root)

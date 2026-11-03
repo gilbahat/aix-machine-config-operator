@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -63,8 +64,19 @@ func (a *Agent) Run(ctx context.Context) error {
 		for k, v := range a.Info {
 			ann[k] = v
 		}
-		if err := a.annotate(ctx, ann); err != nil {
-			return err
+		// At boot the agent may start before the API server is reachable or
+		// before the kubelet has registered the node; keep trying.
+		for backoff := time.Second; ; backoff = min(2*backoff, time.Minute) {
+			err := a.annotate(ctx, ann)
+			if err == nil {
+				break
+			}
+			klog.Warningf("reporting agent start-up on node %s (retrying in %s): %v", a.NodeName, backoff, err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(backoff):
+			}
 		}
 	}
 
@@ -148,17 +160,22 @@ func (a *Agent) Reconcile(ctx context.Context, node *corev1.Node) error {
 		return a.degrade(ctx, fmt.Errorf("reading applied state: %w", err))
 	}
 	force := a.Host.ForceRequested()
-	upToDate := applied != nil && applied.Name == desired && nodestate.Current(node) == desired
+	upToDate := applied != nil && applied.Pending == nil && applied.Config != nil && applied.Name == desired && nodestate.Current(node) == desired
 	if !force && upToDate {
 		// The applied state is only recorded after a successful apply, so
 		// the only thing left to check is whether the files drifted.
 		return a.checkDrift(ctx, node, applied)
 	}
+	// A new config rewrites everything when the node has drifted, so the
+	// update also repairs the drift instead of reporting Done over it.
+	full := force || a.drift
+	if !full && applied != nil && applied.Config != nil && len(a.Host.Drift(applied.Config)) > 0 {
+		full = true
+	}
 	if force {
 		klog.Infof("%s present: re-applying %s in full", ForceFile, desired)
-		applied = nil
 	}
-	if err := a.apply(ctx, node, desired, applied); err != nil {
+	if err := a.apply(ctx, node, desired, full); err != nil {
 		return a.degrade(ctx, err)
 	}
 	if force {
@@ -169,7 +186,7 @@ func (a *Agent) Reconcile(ctx context.Context, node *corev1.Node) error {
 	return nil
 }
 
-func (a *Agent) apply(ctx context.Context, node *corev1.Node, desired string, applied *Applied) error {
+func (a *Agent) apply(ctx context.Context, node *corev1.Node, desired string, full bool) error {
 	if nodestate.State(node) != nodestate.StateWorking {
 		if err := a.annotate(ctx, map[string]interface{}{nodestate.StateAnnotation: nodestate.StateWorking, nodestate.ReasonAnnotation: nil}); err != nil {
 			return err
@@ -179,11 +196,11 @@ func (a *Agent) apply(ctx context.Context, node *corev1.Node, desired string, ap
 	if err != nil {
 		return fmt.Errorf("fetching rendered config %s: %w", desired, err)
 	}
-	to, err := rendered.Unmarshal([]byte(cm.Data[rendered.ConfigMapKey]))
+	to, err := verifyRendered(cm, desired)
 	if err != nil {
-		return fmt.Errorf("rendered config %s: %w", desired, err)
+		return err
 	}
-	if err := ApplyConfig(ctx, a.Host, a.Restarter, desired, to, applied); err != nil {
+	if err := ApplyConfig(ctx, a.Host, a.Restarter, desired, to, full); err != nil {
 		return err
 	}
 	a.drift = false
@@ -194,31 +211,78 @@ func (a *Agent) apply(ctx context.Context, node *corev1.Node, desired string, ap
 	})
 }
 
-// ApplyConfig moves the host from applied (nil if unknown) to cfg and
-// restarts the affected services. It is shared by the cluster loop and the
-// standalone `amco-agent apply` command. A nil restarter skips restarts.
-func ApplyConfig(ctx context.Context, host Host, restarter Restarter, name string, cfg *rendered.Config, applied *Applied) error {
+// verifyRendered checks that a ConfigMap is a genuine rendered config: the
+// operator creates them immutable, labelled with their pool and named after
+// their content hash, so a ConfigMap that is mutable, unlabelled or whose
+// content does not hash to its name is refused.
+func verifyRendered(cm *corev1.ConfigMap, name string) (*rendered.Config, error) {
+	if cm.Immutable == nil || !*cm.Immutable {
+		return nil, fmt.Errorf("rendered config %s is not immutable; refusing it", name)
+	}
+	if cm.Labels[rendered.PoolLabel] == "" {
+		return nil, fmt.Errorf("rendered config %s has no %s label; refusing it", name, rendered.PoolLabel)
+	}
+	cfg, err := rendered.Unmarshal([]byte(cm.Data[rendered.ConfigMapKey]))
+	if err != nil {
+		return nil, fmt.Errorf("rendered config %s: %w", name, err)
+	}
+	if got, err := cfg.Name(); err != nil || got != name {
+		return nil, fmt.Errorf("rendered config %s: content does not match its name (hashes to %s); refusing it", name, got)
+	}
+	return cfg, nil
+}
+
+// ApplyConfig moves the host to cfg and restarts the affected services. It
+// is shared by the cluster loop and the standalone `amco-agent apply`
+// command. A nil restarter skips restarts.
+//
+// The change is computed from the last fully applied config, unless full is
+// set or a previous apply did not finish, in which case every file is
+// rewritten and every service whose files are involved is restarted. Files
+// the agent wrote before and that cfg no longer lists are removed.
+func ApplyConfig(ctx context.Context, host Host, restarter Restarter, name string, cfg *rendered.Config, full bool) error {
+	state, err := host.LoadApplied()
+	if err != nil {
+		return err
+	}
+	owned := state.Owned()
 	var from *rendered.Config
-	owned := map[string]bool{}
-	if applied != nil {
-		from = applied.Config
-		for _, f := range from.Files {
-			owned[f.Path] = true
-		}
-	} else if prev, err := host.LoadApplied(); err == nil && prev != nil {
-		// A full re-apply still knows which files it owns.
-		for _, f := range prev.Config.Files {
-			owned[f.Path] = true
-		}
-		plan := rendered.Diff(prev.Config, cfg)
-		for _, p := range plan.Remove {
-			if err := host.remove(p); err != nil {
-				return err
-			}
-		}
+	if state != nil && state.Pending == nil && !full {
+		from = state.Config
+	}
+	if state != nil && state.Pending != nil {
+		klog.Info("the previous apply did not finish; re-applying in full")
 	}
 	plan := rendered.Diff(from, cfg)
+
+	// Removals and their policies come from everything the agent may have
+	// written, including a half-applied config.
+	keep := map[string]bool{}
+	for _, f := range cfg.Files {
+		keep[f.Path] = true
+	}
+	groups := map[rendered.Group]bool{}
+	for _, f := range plan.Write {
+		groups[f.Group] = true
+	}
+	plan.Remove = nil
+	for p, f := range owned {
+		if !keep[p] {
+			plan.Remove = append(plan.Remove, p)
+			groups[f.Group] = true
+		}
+	}
+	sort.Strings(plan.Remove)
+	plan.Drain, plan.Restart = rendered.PolicyFor(groups)
+
 	klog.Infof("applying %s: %s", name, plan)
+	pending := &Applied{Pending: cfg}
+	if state != nil {
+		pending.Name, pending.Config = state.Name, state.Config
+	}
+	if err := host.SaveApplied(pending); err != nil {
+		return fmt.Errorf("recording apply in progress: %w", err)
+	}
 	if err := host.Apply(plan, owned); err != nil {
 		return fmt.Errorf("writing files: %w", err)
 	}

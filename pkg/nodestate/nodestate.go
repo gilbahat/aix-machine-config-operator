@@ -78,6 +78,11 @@ func IsDone(node *corev1.Node, target string) bool {
 	return target != "" && Desired(node) == target && Current(node) == target && State(node) == StateDone
 }
 
+// HasAgent reports whether an AMCO agent has reported in on node.
+func HasAgent(node *corev1.Node) bool {
+	return node.Annotations[AgentVersionAnnotation] != ""
+}
+
 // IsReady reports whether the node's Ready condition is True.
 func IsReady(node *corev1.Node) bool {
 	for _, c := range node.Status.Conditions {

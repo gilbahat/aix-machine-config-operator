@@ -149,8 +149,30 @@ back when AMCO stops managing the path.
 
 The agent checks the managed files every minute. If a file was changed by
 hand, the node reports `Degraded`. The agent does not overwrite the change,
-which is the MCO's policy too. To recover, either restore the file or run
-`touch /etc/amco/force`, which makes the agent re-apply everything.
+which is the MCO's policy too. To recover, do one of these:
+
+* Restore the file.
+* Wait for the next rendered config, which rewrites every file.
+* Run `touch /etc/amco/force`. The agent then re-applies everything and
+  restarts the affected services. That restart happens without a drain, so
+  pods on the node see the kubelet restart.
+
+If an apply fails partway (for example a service does not come back), the
+agent re-applies the next config in full rather than as a diff.
+
+### Agent safeguards
+
+* The agent only writes the paths listed above. It only accepts a rendered
+  ConfigMap that is immutable, labelled with its pool, and whose content
+  hashes to its name.
+* A node is only updated once its agent has reported in (the `agentVersion`
+  annotation). Until then the pool lists it under `warnings`, so a node
+  whose agent is not installed yet is never cordoned.
+* The agent's token can patch any Node object, and RBAC cannot narrow that.
+  `manifests/06-agent-admission-policy.yaml` is a ValidatingAdmissionPolicy
+  that limits the token to its own reporting annotations: no spec, label or
+  other annotation changes. All nodes share one token; issue one per node if
+  one node must not be able to write another's annotations.
 
 ## Testing without a cluster or kubelet
 
@@ -190,7 +212,13 @@ these limits shows up as a pool warning:
 * Search registries are not supported.
 * Wildcard scopes are not supported.
 * A mirror can only add a path prefix, not rename a repository.
+* Mirrors are per host: a mirror configured for one repository is also
+  tried for every other repository on that registry (images it does not
+  have fall back to the registry).
 * `NeverContactSource` can only be enforced for whole-registry sources.
+* Tag mirrors (ITMS) are also used for digest pulls.
+* Insecure registries are written as `http://` hosts with `skip_verify`, so
+  containerd tries HTTPS without verification first and then plain HTTP.
 
 Other gaps:
 
@@ -203,8 +231,10 @@ Other gaps:
   AMCO will need the same once the kubelet port exists.
 * The kubelet kubeconfig and its CA are not rotated. Kubelet feature gates
   are not rendered.
-* The agent's token can patch any Node object, and RBAC cannot narrow it.
-  The same is true of the machine-config-daemon.
+* AIX nodes don't get the `/etc/hosts` entry for
+  `image-registry.openshift-image-registry.svc` that the Linux-only
+  node-resolver DaemonSet writes on RHCOS. The hosts.toml for the internal
+  registry is rendered, but the name must resolve some other way.
 
 ## Building
 

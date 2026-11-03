@@ -7,6 +7,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/klog/v2"
 
@@ -39,10 +40,32 @@ func (o *Operator) unavailable(node *corev1.Node, target string) bool {
 	if nodestate.Desired(node) != nodestate.Current(node) || nodestate.State(node) == nodestate.StateWorking {
 		return true
 	}
+	return o.draining(node.Name)
+}
+
+// draining reports whether a cordon-and-drain is in progress for node.
+func (o *Operator) draining(node string) bool {
 	o.mu.Lock()
-	_, draining := o.inflight[node.Name]
-	o.mu.Unlock()
-	return draining
+	defer o.mu.Unlock()
+	_, ok := o.inflight[node]
+	return ok
+}
+
+// finishedCordon reports whether AMCO cordoned node for the config it now
+// runs, i.e. the update it was cordoned for is complete. While a drain is
+// running or being retried the node is still on its old config (desired is
+// not yet cordonedFor), so it stays cordoned.
+func (o *Operator) finishedCordon(n *corev1.Node) bool {
+	cordonedFor := n.Annotations[nodestate.CordonedByAnnotation]
+	return cordonedFor != "" && cordonedFor == nodestate.Desired(n) && nodestate.IsDone(n, cordonedFor) && !o.draining(n.Name)
+}
+
+// uncordon lifts a cordon AMCO made and forgets it.
+func (o *Operator) uncordon(ctx context.Context, n *corev1.Node) error {
+	if err := o.drainer.Cordon(ctx, n, false); err != nil {
+		return err
+	}
+	return o.setNodeAnnotations(ctx, n.Name, map[string]interface{}{nodestate.CordonedByAnnotation: nil})
 }
 
 // rollout moves the pool's nodes to st.target. It returns how soon the pool
@@ -54,12 +77,9 @@ func (o *Operator) rollout(ctx context.Context, st *poolSync) (time.Duration, er
 	}
 	// Finish nodes that are done: uncordon the ones AMCO cordoned.
 	for i, n := range st.nodes {
-		if cordonedFor := n.Annotations[nodestate.CordonedByAnnotation]; cordonedFor != "" && nodestate.IsDone(n, nodestate.Desired(n)) {
+		if o.finishedCordon(n) {
 			klog.Infof("node %s finished updating to %s; uncordoning", n.Name, nodestate.Current(n))
-			if err := o.drainer.Cordon(ctx, n, false); err != nil {
-				return 0, err
-			}
-			if err := o.setNodeAnnotations(ctx, n.Name, map[string]interface{}{nodestate.CordonedByAnnotation: nil}); err != nil {
+			if err := o.uncordon(ctx, n); err != nil {
 				return 0, err
 			}
 			// Count the node as available for the rest of this sync.
@@ -86,6 +106,11 @@ func (o *Operator) rollout(ctx context.Context, st *poolSync) (time.Duration, er
 		// Let an agent finish what it is doing; a degraded node may be
 		// moved on to a new config, which is how it recovers.
 		if nodestate.State(n) == nodestate.StateWorking {
+			continue
+		}
+		// Do not cordon a node nobody will update: wait until its agent
+		// has reported in.
+		if !nodestate.HasAgent(n) {
 			continue
 		}
 		candidates = append(candidates, n)
@@ -153,7 +178,7 @@ func (o *Operator) startUpdate(ctx context.Context, st *poolSync, node *corev1.N
 	o.mu.Unlock()
 	pool := st.pool.Name
 	o.async(func() {
-		err := o.cordonAndDrain(ctx, node, target)
+		err := o.cordonAndDrain(ctx, node.Name, target)
 		o.mu.Lock()
 		delete(o.inflight, node.Name)
 		if err != nil {
@@ -164,13 +189,20 @@ func (o *Operator) startUpdate(ctx context.Context, st *poolSync, node *corev1.N
 		o.mu.Unlock()
 		if err != nil {
 			klog.Errorf("pool %s: draining node %s failed (retrying in %s): %v", pool, node.Name, o.cfg.DrainRetryInterval, err)
+			o.poolQueue.AddAfter(pool, o.cfg.DrainRetryInterval)
+			return
 		}
 		o.poolQueue.Add(pool)
 	})
 	return 0, nil
 }
 
-func (o *Operator) cordonAndDrain(ctx context.Context, node *corev1.Node, target string) error {
+func (o *Operator) cordonAndDrain(ctx context.Context, name string, target string) error {
+	// Work from the node as it is now, not as it was when the drain was queued.
+	node, err := o.kube.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
 	// Only remember the cordon if AMCO made it: an administrator's cordon
 	// stays in place after the update.
 	if !node.Spec.Unschedulable || node.Annotations[nodestate.CordonedByAnnotation] != "" {
@@ -205,6 +237,9 @@ func (o *Operator) planFor(node *corev1.Node, target string) (rendered.Plan, err
 	return rendered.Diff(from, to), nil
 }
 
+// reportDrainFailures copies the pool's drain failures into st. Failures are
+// kept per node across pools and only forgotten when the node is gone (or no
+// longer an AIX node) or a drain succeeds.
 func (o *Operator) reportDrainFailures(st *poolSync) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -213,11 +248,11 @@ func (o *Operator) reportDrainFailures(st *poolSync) {
 		members[n.Name] = true
 	}
 	for name, f := range o.failures {
-		if !members[name] {
+		if n, err := o.nodeLister.Get(name); err != nil || !nodestate.IsAIX(n) {
 			delete(o.failures, name)
 			continue
 		}
-		if f.target == st.target {
+		if members[name] && f.target == st.target {
 			st.drainErrors[name] = f.err.Error()
 		}
 	}
