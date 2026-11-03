@@ -1,0 +1,19 @@
+apiVersion: config.openshift.io/v1
+kind: ImageDigestMirrorSet
+metadata:
+  name: release-mirror
+spec:
+  imageDigestMirrors:
+  - source: quay.io/openshift-release-dev/ocp-release
+    mirrors:
+    - mirror.example.com:5000/quay/openshift-release-dev/ocp-release
+---
+apiVersion: config.openshift.io/v1
+kind: ImageTagMirrorSet
+metadata:
+  name: hub-mirror
+spec:
+  imageTagMirrors:
+  - source: docker.io
+    mirrors:
+    - mirror.example.com:5000/docker

@@ -1,0 +1,30 @@
+# A trimmed ControllerConfig for offline rendering. On a cluster, use
+#   oc get controllerconfig machine-config-controller -o yaml
+# (the MCO keeps it current with the cluster's CA bundles).
+apiVersion: machineconfiguration.openshift.io/v1
+kind: ControllerConfig
+metadata:
+  name: machine-config-controller
+spec:
+  clusterDNSIP: 172.30.0.10
+  # base64 of the kube-apiserver-to-kubelet client CA bundle
+  kubeAPIServerServingCAData: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCmV4YW1wbGUta3ViZWxldC1jbGllbnQtY2EKLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+  rootCAData: ""
+  cloudProviderConfig: ""
+  cloudProviderCAData: ""
+  additionalTrustBundle: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCmV4YW1wbGUtcHJveHktY2EKLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+  imageRegistryBundleData: []
+  imageRegistryBundleUserData:
+  - file: mirror.example.com..5000
+    data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCmV4YW1wbGUtbWlycm9yLWNhCi0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K
+  internalRegistryPullSecret: null
+  images: {}
+  baseOSContainerImage: ""
+  baseOSExtensionsContainerImage: ""
+  osImageURL: ""
+  releaseImage: ""
+  proxy: null
+  infra: null
+  dns: null
+  ipFamilies: IPv4
+  network: null
