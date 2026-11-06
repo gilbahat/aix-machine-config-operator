@@ -63,8 +63,8 @@ func (d SubsystemDefinition) WithDefaults() SubsystemDefinition {
 
 // Validate checks a definition before it reaches mkssys or chssys.
 func (d SubsystemDefinition) Validate() error {
-	if !path.IsAbs(d.Path) || path.Clean(d.Path) != d.Path {
-		return fmt.Errorf("subsystem program %q must be an absolute, clean path", d.Path)
+	if !path.IsAbs(d.Path) || path.Clean(d.Path) != d.Path || strings.ContainsAny(d.Path, ":\n\r\x00") {
+		return fmt.Errorf("subsystem program %q must be an absolute, clean path without ':'", d.Path)
 	}
 	if strings.ContainsAny(d.Arguments, ":\n\r\x00") {
 		return fmt.Errorf("subsystem arguments may not contain ':' or line breaks")

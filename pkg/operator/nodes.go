@@ -3,6 +3,7 @@ package operator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -45,10 +46,12 @@ func (o *Operator) syncNode(ctx context.Context, name string) (time.Duration, er
 		node = node.DeepCopy()
 		node.Labels[nodestate.RoleLabel] = ""
 	}
+	// Release an orphaned cordon even if the conditions cannot be set.
+	cordonErr := o.releaseOrphanedCordon(ctx, node)
 	if err := o.syncNodeConditions(ctx, node); err != nil {
-		return 0, err
+		return 0, errors.Join(cordonErr, err)
 	}
-	return 0, o.releaseOrphanedCordon(ctx, node)
+	return 0, cordonErr
 }
 
 // releaseOrphanedCordon uncordons a node AMCO cordoned that no pool manages

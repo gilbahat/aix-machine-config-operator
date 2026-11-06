@@ -235,11 +235,22 @@ func (o *Operator) planFor(node *corev1.Node, target string) ([]string, bool, er
 	if to == nil {
 		return nil, false, fmt.Errorf("rendered config %s not found", target)
 	}
+	// A current config that cannot be read (written by an older operator,
+	// or garbage collected) is treated as unknown.
 	from, err := o.renderedConfig(nodestate.Current(node))
 	if err != nil {
-		return nil, false, err
+		klog.Warningf("node %s: reading its current config %s: %v; treating it as unknown", node.Name, nodestate.Current(node), err)
+		from = nil
 	}
-	return rendered.Changes(from, to), rendered.DrainNeeded(from, to), nil
+	drain := rendered.DrainNeeded(from, to)
+	// If the node was last sent a config it never finished, the agent may
+	// have applied part of it; its items are undone too, so they count.
+	if d := nodestate.Desired(node); d != "" && d != nodestate.Current(node) && d != target {
+		if partial, err := o.renderedConfig(d); err == nil && partial != nil {
+			drain = drain || rendered.DrainNeeded(partial, to)
+		}
+	}
+	return rendered.Changes(from, to), drain, nil
 }
 
 // reportDrainFailures copies the pool's drain failures into st. Failures are

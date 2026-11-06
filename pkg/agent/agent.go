@@ -166,18 +166,12 @@ func (a *Agent) Reconcile(ctx context.Context, node *corev1.Node) error {
 		// the only thing left to check is whether items drifted.
 		return a.checkDrift(ctx, node)
 	}
-	// A new config re-runs every action when the node has drifted, so the
-	// update also repairs the drift instead of reporting Done over it.
-	full := force || a.drift
-	if !full && st.Config != nil {
-		if issues, err := a.Engine.Drift(ctx); err == nil && len(issues) > 0 {
-			full = true
-		}
-	}
+	// Applying compares every item with its live state, so a new config
+	// also repairs drifted items; only the force file re-runs every action.
 	if force {
 		klog.Infof("%s present: re-applying %s in full", ForceFile, desired)
 	}
-	if err := a.apply(ctx, node, desired, full); err != nil {
+	if err := a.apply(ctx, node, desired, force); err != nil {
 		return a.degrade(ctx, err)
 	}
 	if force {
@@ -188,7 +182,7 @@ func (a *Agent) Reconcile(ctx context.Context, node *corev1.Node) error {
 	return nil
 }
 
-func (a *Agent) apply(ctx context.Context, node *corev1.Node, desired string, full bool) error {
+func (a *Agent) apply(ctx context.Context, node *corev1.Node, desired string, force bool) error {
 	if nodestate.State(node) != nodestate.StateWorking {
 		if err := a.annotate(ctx, map[string]interface{}{nodestate.StateAnnotation: nodestate.StateWorking, nodestate.ReasonAnnotation: nil}); err != nil {
 			return err
@@ -202,7 +196,7 @@ func (a *Agent) apply(ctx context.Context, node *corev1.Node, desired string, fu
 	if err != nil {
 		return err
 	}
-	if _, err := a.Engine.Apply(ctx, desired, to, full); err != nil {
+	if _, err := a.Engine.Apply(ctx, desired, to, ApplyOptions{Force: force}); err != nil {
 		_ = a.reportOnly(ctx)
 		return err
 	}
@@ -287,7 +281,7 @@ func (a *Agent) checkDrift(ctx context.Context, node *corev1.Node) error {
 	if err := a.addReport(ann); err != nil {
 		return err
 	}
-	setJSON(ann, nodestate.DriftAnnotation, issues)
+	setJSON(ann, nodestate.DriftAnnotation, capIssues(issues))
 	if len(issues) > 0 {
 		a.drift = true
 		var parts []string
@@ -311,6 +305,17 @@ func (a *Agent) checkDrift(ctx context.Context, node *corev1.Node) error {
 		return nil
 	}
 	return a.annotate(ctx, ann)
+}
+
+// maxReportedIssues keeps the drift annotation, and so the Node, small.
+const maxReportedIssues = 50
+
+func capIssues(issues []nodestate.ItemIssue) []nodestate.ItemIssue {
+	if len(issues) <= maxReportedIssues {
+		return issues
+	}
+	out := append([]nodestate.ItemIssue(nil), issues[:maxReportedIssues-1]...)
+	return append(out, nodestate.ItemIssue{Item: "...", Reason: fmt.Sprintf("%d more items drifted", len(issues)-maxReportedIssues+1)})
 }
 
 // annotationsMatch reports whether node already carries ann (nil = absent),

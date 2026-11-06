@@ -197,7 +197,7 @@ spec:
                       enum: ["no", vmo, ioo, schedo, nfso, raso]
                     name:
                       type: string
-                      pattern: '^[a-z][a-z0-9_]{0,63}$'
+                      pattern: '^[A-Za-z][A-Za-z0-9_%]{0,63}$'
                     value:
                       description: A decimal integer. Checked by the operator (RenderDegraded) and the agent.
                       x-kubernetes-int-or-string: true

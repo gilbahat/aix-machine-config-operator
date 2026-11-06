@@ -89,7 +89,7 @@ func mergeMachineConfigs(cfg *rendered.Config, configs []*amcov1alpha1.AIXMachin
 			inittab[item.Key()] = item
 		}
 		for _, t := range mc.Spec.Tunables {
-			item := rendered.Tunable{Command: t.Command, Name: t.Name, Value: t.Value.String(), Policy: policy(t.ItemPolicy)}
+			item := rendered.Tunable{Command: t.Command, Name: t.Name, Value: string(t.Value), Policy: policy(t.ItemPolicy)}
 			if err := validateItem(&rendered.Config{Tunables: []rendered.Tunable{item}}); err != nil {
 				return nil, fmt.Errorf("AIXMachineConfig %s: %w", mc.Name, err)
 			}
@@ -97,7 +97,7 @@ func mergeMachineConfigs(cfg *rendered.Config, configs []*amcov1alpha1.AIXMachin
 			tunables[item.Key()] = item
 		}
 		for _, d := range mc.Spec.DeviceAttributes {
-			item := rendered.DeviceAttribute{Device: d.Device, Attribute: d.Attribute, Value: d.Value.String(), OnBusy: d.OnBusy, Policy: policy(d.ItemPolicy)}
+			item := rendered.DeviceAttribute{Device: d.Device, Attribute: d.Attribute, Value: string(d.Value), OnBusy: d.OnBusy, Policy: policy(d.ItemPolicy)}
 			if err := validateItem(&rendered.Config{DeviceAttributes: []rendered.DeviceAttribute{item}}); err != nil {
 				return nil, fmt.Errorf("AIXMachineConfig %s: %w", mc.Name, err)
 			}

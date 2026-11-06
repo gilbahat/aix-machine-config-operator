@@ -42,7 +42,7 @@ func nodeConditions(node *corev1.Node) []corev1.NodeCondition {
 	if bt := node.Annotations[nodestate.BootTimeAnnotation]; bt != "" && len(msg) > 0 {
 		msg = append(msg, "Up since "+bt+".")
 	}
-	reboot := cond(nodestate.ConditionRebootRequired, len(pending) > 0, "ChangesPendingReboot", "NoChangesPending", strings.Join(msg, " "))
+	reboot := cond(nodestate.ConditionRebootRequired, len(pending) > 0, "ChangesPendingReboot", "NoChangesPending", truncateMessage(strings.Join(msg, " ")))
 
 	reprov := nodestate.Reprovision(node)
 	reprovision := cond(nodestate.ConditionReprovisionRequired, len(reprov) > 0, "ItemsCannotConvergeInPlace", "AsExpected", describe(reprov))
@@ -52,12 +52,22 @@ func nodeConditions(node *corev1.Node) []corev1.NodeCondition {
 	return []corev1.NodeCondition{reboot, reprovision, drift}
 }
 
+// maxConditionMessage keeps node conditions readable and the Node small.
+const maxConditionMessage = 2048
+
 func describe(issues []nodestate.ItemIssue) string {
 	var parts []string
 	for _, i := range issues {
 		parts = append(parts, i.Item+": "+i.Reason)
 	}
-	return strings.Join(parts, "; ")
+	return truncateMessage(strings.Join(parts, "; "))
+}
+
+func truncateMessage(s string) string {
+	if len(s) > maxConditionMessage {
+		return s[:maxConditionMessage-3] + "..."
+	}
+	return s
 }
 
 // syncNodeConditions sets the AIX node conditions when they changed. Only

@@ -1,10 +1,42 @@
 package v1alpha1
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 )
+
+// ItemValue is a tunable or device attribute value, written as a YAML number
+// or string. Unlike intstr.IntOrString it keeps numbers of any size, so a
+// 64-bit tunable value cannot break decoding.
+type ItemValue string
+
+// UnmarshalJSON accepts a JSON string or number.
+func (v *ItemValue) UnmarshalJSON(b []byte) error {
+	b = bytes.TrimSpace(b)
+	if len(b) > 0 && b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*v = ItemValue(s)
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var n json.Number
+	if err := dec.Decode(&n); err != nil {
+		return fmt.Errorf("value must be a number or a string: %w", err)
+	}
+	*v = ItemValue(n.String())
+	return nil
+}
+
+// MarshalJSON writes the value as a string, which int-or-string accepts.
+func (v ItemValue) MarshalJSON() ([]byte, error) { return json.Marshal(string(v)) }
 
 // AIXMachineConfig declares host configuration for AIX nodes: files, SRC
 // subsystems, inittab entries, kernel tunables and device attributes. Pools
@@ -162,17 +194,17 @@ type InittabSpec struct {
 
 // TunableSpec is a kernel tunable set with no, vmo, ioo, schedo, nfso or raso.
 type TunableSpec struct {
-	Command    string             `json:"command"`
-	Name       string             `json:"name"`
-	Value      intstr.IntOrString `json:"value"`
+	Command    string    `json:"command"`
+	Name       string    `json:"name"`
+	Value      ItemValue `json:"value"`
 	ItemPolicy `json:",inline"`
 }
 
 // DeviceAttributeSpec is a device attribute set with chdev.
 type DeviceAttributeSpec struct {
-	Device    string             `json:"device"`
-	Attribute string             `json:"attribute"`
-	Value     intstr.IntOrString `json:"value"`
+	Device    string    `json:"device"`
+	Attribute string    `json:"attribute"`
+	Value     ItemValue `json:"value"`
 	// OnBusy is what happens when the device is in use: Defer (default)
 	// records the change for the next boot (chdev -P) and reports it as
 	// pending; Fail makes the node Degraded.

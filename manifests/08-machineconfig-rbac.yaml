@@ -24,7 +24,11 @@ rules:
   verbs: [get, list, watch, update, patch]
 ---
 # Read access to configs and pools. Configs may hold sensitive file
-# contents, so this is not aggregated into view either.
+# contents, so this is not aggregated into view either. Note that withholding
+# it does not keep file contents secret: every selected config is copied into
+# the pool's rendered ConfigMap in the aix-machine-config-operator namespace,
+# readable by anyone who can read ConfigMaps there and by the shared
+# amco-agent token. Do not put secrets in AIXMachineConfig files.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

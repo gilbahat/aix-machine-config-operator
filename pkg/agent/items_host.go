@@ -60,7 +60,12 @@ func (r *run) baselineSubsystem(s rendered.Subsystem) (Baseline, error) {
 	if err != nil {
 		return Baseline{}, err
 	}
-	b.Defined, b.Definition, b.State = true, &def, st.State
+	b.Defined, b.State = true, st.State
+	// Only an item that manages the definition records it, so removing a
+	// state-only item never rewrites a definition AMCO did not touch.
+	if s.Definition != nil {
+		b.Definition = &def
+	}
 	return Baseline{Subsystem: b}, nil
 }
 
@@ -76,12 +81,16 @@ func (r *run) applySubsystem(s rendered.Subsystem) error {
 		case err != nil:
 			return err
 		case live != s.Definition.WithDefaults():
+			// A running subsystem keeps its old definition until
+			// restarted; owe the restart before changing it.
+			r.owe(rendered.SubsystemAction{Subsystem: s.Name, Action: rendered.ActionRestart})
+			if err := r.save(); err != nil {
+				return err
+			}
 			if err := r.src.Redefine(r.ctx, s.Name, *s.Definition); err != nil {
 				return err
 			}
 			klog.Infof("changed the definition of SRC subsystem %s", s.Name)
-			// A running subsystem keeps its old definition until restarted.
-			r.actions[s.Name] = rendered.SubsystemAction{Subsystem: s.Name, Action: rendered.ActionRestart}
 		}
 	}
 	return r.convergeState(s.Name, s.State)
@@ -126,6 +135,9 @@ func (r *run) restoreSubsystem(name string, b *SubsystemBaseline) error {
 			return err
 		}
 		klog.Infof("removing SRC subsystem %s (AMCO defined it)", name)
+		r.undefined[name] = true
+		delete(r.actions, name)
+		r.st.Restarting = remove(r.st.Restarting, name)
 		return r.src.Undefine(r.ctx, name)
 	}
 	if b.Definition != nil {
@@ -134,10 +146,13 @@ func (r *run) restoreSubsystem(name string, b *SubsystemBaseline) error {
 			return err
 		}
 		if live != *b.Definition {
+			r.owe(rendered.SubsystemAction{Subsystem: name, Action: rendered.ActionRestart})
+			if err := r.save(); err != nil {
+				return err
+			}
 			if err := r.src.Redefine(r.ctx, name, *b.Definition); err != nil {
 				return err
 			}
-			r.actions[name] = rendered.SubsystemAction{Subsystem: name, Action: rendered.ActionRestart}
 		}
 	}
 	switch b.State {
@@ -256,10 +271,19 @@ func (r *run) applyTunable(command, name, value, key string) error {
 		delete(r.st.PendingReboot, key)
 		return r.tun.SetNow(r.ctx, command, name, value)
 	}
-	if err := r.tun.SetReboot(r.ctx, command, name, value); err != nil {
+	if err := r.markPending(key, value); err != nil {
 		return err
 	}
-	r.markPending(key, value)
+	if info.Type == aix.TunableBosboot {
+		r.st.BosbootNeeded = true
+		if err := r.save(); err != nil {
+			return err
+		}
+	}
+	if err := r.tun.SetReboot(r.ctx, command, name, value); err != nil {
+		delete(r.st.PendingReboot, key)
+		return err
+	}
 	if info.Type == aix.TunableBosboot {
 		r.bosboot = true
 	}
@@ -356,10 +380,13 @@ func (r *run) applyDevice(device, attribute, value, onBusy, key string) error {
 	if onBusy == rendered.OnBusyFail {
 		return fmt.Errorf("%w and onBusy is Fail", err)
 	}
-	if err := r.dev.SetDeferred(r.ctx, device, attribute, value); err != nil {
+	if err := r.markPending(key, value); err != nil {
 		return err
 	}
-	r.markPending(key, value)
+	if err := r.dev.SetDeferred(r.ctx, device, attribute, value); err != nil {
+		delete(r.st.PendingReboot, key)
+		return err
+	}
 	klog.Infof("%s is busy; %s=%s recorded for the next boot (chdev -P)", device, attribute, value)
 	return nil
 }
