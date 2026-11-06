@@ -10,7 +10,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -77,29 +76,48 @@ func newFlagSet(name string, c *commonFlags) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
 	klog.InitFlags(fs)
 	fs.StringVar(&c.root, "root", "/", "host root to write files under (tests and dry runs)")
-	fs.BoolVar(&c.noRestart, "no-restart", false, "do not restart node services after writing files")
+	fs.BoolVar(&c.noRestart, "no-restart", false, "do not restart or refresh subsystems after changes (required off AIX, where only files are applied)")
 	return fs
 }
 
-// restarter returns the SRC-backed restarter, or nil when restarts are off.
-func (c *commonFlags) restarter() (agent.Restarter, error) {
-	if c.noRestart {
-		return nil, nil
-	}
+// engine builds the item engine. On AIX it runs commands through the
+// logging ExecRunner and reads the boot time; elsewhere (dry runs) only files
+// can be applied, under --root, and subsystem actions are skipped.
+func (c *commonFlags) engine(ctx context.Context) (*agent.Engine, error) {
+	e := &agent.Engine{Files: agent.Host{Root: c.root}, NoRestart: c.noRestart}
 	if runtime.GOOS != "aix" {
-		return nil, fmt.Errorf("restarting services needs the AIX SRC; use --no-restart on %s", runtime.GOOS)
+		if !c.noRestart {
+			return nil, fmt.Errorf("running AIX commands needs AIX; use --no-restart on %s for a dry run (only files are applied, without ownership)", runtime.GOOS)
+		}
+		e.DryRun = true
+		return e, nil
 	}
-	return srcRestarter{aix.NewSRC(aix.ExecRunner{})}, nil
+	e.Runner = timeoutRunner{aix.ExecRunner{}, 10 * time.Minute}
+	boot, err := aix.BootTime(ctx, e.Runner, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	e.BootTime = boot
+	return e, nil
 }
 
-type srcRestarter struct{ src *aix.SRC }
+// timeoutRunner bounds every AIX command, so a hung command cannot stall the
+// agent forever.
+type timeoutRunner struct {
+	r       aix.Runner
+	timeout time.Duration
+}
 
-func (s srcRestarter) Restart(ctx context.Context, name string) error {
-	err := s.src.Restart(ctx, name)
-	if errors.Is(err, aix.ErrSubsystemNotFound) {
-		return fmt.Errorf("%w: %v", agent.ErrServiceNotDefined, err)
-	}
-	return err
+func (t timeoutRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, t.timeout)
+	defer cancel()
+	return t.r.Run(ctx, name, args...)
+}
+
+func (t timeoutRunner) RunWithInput(ctx context.Context, input []byte, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, t.timeout)
+	defer cancel()
+	return t.r.RunWithInput(ctx, input, name, args...)
 }
 
 func run(args []string) error {
@@ -113,7 +131,7 @@ func run(args []string) error {
 	interval := fs.Duration("interval", time.Minute, "how often to check for drift and retry failed applies")
 	_ = fs.Parse(args)
 
-	restarter, err := c.restarter()
+	engine, err := c.engine(context.Background())
 	if err != nil {
 		return err
 	}
@@ -143,9 +161,8 @@ func run(args []string) error {
 	defer cancel()
 	klog.Infof("amco-agent %s starting for node %s", version.Version, *nodeName)
 	a := &agent.Agent{
-		Host:      agent.Host{Root: c.root},
+		Engine:    engine,
 		Kube:      kube,
-		Restarter: restarter,
 		NodeName:  *nodeName,
 		Namespace: *namespace,
 		Interval:  *interval,
@@ -158,7 +175,7 @@ func apply(args []string) error {
 	var c commonFlags
 	fs := newFlagSet("apply", &c)
 	file := fs.String("f", "", "rendered config JSON (output of aix-machine-config-operator render)")
-	full := fs.Bool("full", false, "rewrite every file and restart every affected service, not just what changed")
+	full := fs.Bool("full", false, "run every item's subsystem actions, not only those of changed items")
 	_ = fs.Parse(args)
 	if *file == "" {
 		return fmt.Errorf("apply: -f is required")
@@ -175,16 +192,19 @@ func apply(args []string) error {
 	if err != nil {
 		return err
 	}
-	restarter, err := c.restarter()
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	engine, err := c.engine(ctx)
 	if err != nil {
 		return err
 	}
-	host := agent.Host{Root: c.root}
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-	if err := agent.ApplyConfig(ctx, host, restarter, name, cfg, *full); err != nil {
+	if _, err := engine.ReconcileBoot(); err != nil {
 		return err
 	}
-	klog.Infof("applied %s under %s", name, c.root)
+	res, err := engine.Apply(ctx, name, cfg, *full)
+	if err != nil {
+		return err
+	}
+	klog.Infof("applied %s under %s: changed %v, pending reboot %v, reprovision %v", name, c.root, res.Changed, res.PendingReboot, res.Reprovision)
 	return nil
 }

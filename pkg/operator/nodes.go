@@ -45,6 +45,9 @@ func (o *Operator) syncNode(ctx context.Context, name string) (time.Duration, er
 		node = node.DeepCopy()
 		node.Labels[nodestate.RoleLabel] = ""
 	}
+	if err := o.syncNodeConditions(ctx, node); err != nil {
+		return 0, err
+	}
 	return 0, o.releaseOrphanedCordon(ctx, node)
 }
 

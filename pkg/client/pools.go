@@ -96,3 +96,47 @@ func NewPoolInformer(p PoolInterface, resync time.Duration) cache.SharedIndexInf
 	}
 	return cache.NewSharedIndexInformer(lw, &amcov1alpha1.AIXConfigPool{}, resync, cache.Indexers{})
 }
+
+// MachineConfigInterface reads AIXMachineConfigs.
+type MachineConfigInterface interface {
+	List(ctx context.Context, opts metav1.ListOptions) (*amcov1alpha1.AIXMachineConfigList, error)
+	Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error)
+}
+
+type machineConfigs struct {
+	rc rest.Interface
+}
+
+// NewMachineConfigs returns a MachineConfigInterface for the cluster
+// described by cfg.
+func NewMachineConfigs(cfg *rest.Config) (MachineConfigInterface, error) {
+	p, err := NewPools(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &machineConfigs{rc: p.(*pools).rc}, nil
+}
+
+func (m *machineConfigs) List(ctx context.Context, opts metav1.ListOptions) (*amcov1alpha1.AIXMachineConfigList, error) {
+	out := &amcov1alpha1.AIXMachineConfigList{}
+	err := m.rc.Get().Resource(amcov1alpha1.MachineConfigResource).VersionedParams(&opts, metav1.ParameterCodec).Do(ctx).Into(out)
+	return out, err
+}
+
+func (m *machineConfigs) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+	opts.Watch = true
+	return m.rc.Get().Resource(amcov1alpha1.MachineConfigResource).VersionedParams(&opts, metav1.ParameterCodec).Watch(ctx)
+}
+
+// NewMachineConfigInformer returns a shared informer over all AIXMachineConfigs.
+func NewMachineConfigInformer(m MachineConfigInterface, resync time.Duration) cache.SharedIndexInformer {
+	lw := &cache.ListWatch{
+		ListWithContextFunc: func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
+			return m.List(ctx, opts)
+		},
+		WatchFuncWithContext: func(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+			return m.Watch(ctx, opts)
+		},
+	}
+	return cache.NewSharedIndexInformer(lw, &amcov1alpha1.AIXMachineConfig{}, resync, cache.Indexers{})
+}

@@ -77,11 +77,15 @@ func startCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			machineConfigs, err := client.NewMachineConfigs(restCfg)
+			if err != nil {
+				return err
+			}
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 			klog.Infof("aix-machine-config-operator %s, namespace %s", version.Version, cfg.Namespace)
 			run := func(ctx context.Context) {
-				if err := operator.New(cfg, kube, cfgClient, mcClient, pools).Run(ctx); err != nil {
+				if err := operator.New(cfg, kube, cfgClient, mcClient, pools, machineConfigs).Run(ctx); err != nil {
 					klog.Fatal(err)
 				}
 			}

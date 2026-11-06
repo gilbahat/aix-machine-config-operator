@@ -42,6 +42,12 @@ type AIXConfigPoolSpec struct {
 	// progress finish.
 	// +optional
 	Paused bool `json:"paused,omitempty"`
+
+	// ConfigSelector selects the AIXMachineConfigs merged into the pool's
+	// configuration, as machineConfigSelector does for a MachineConfigPool.
+	// Unset selects none.
+	// +optional
+	ConfigSelector *metav1.LabelSelector `json:"configSelector,omitempty"`
 }
 
 // AIXConfigPoolStatus is the observed state of an AIXConfigPool.
@@ -63,9 +69,16 @@ type AIXConfigPoolStatus struct {
 	UnavailableMachineCount int32 `json:"unavailableMachineCount"`
 	// DegradedMachineCount is the number of nodes whose agent reports Degraded.
 	DegradedMachineCount int32 `json:"degradedMachineCount"`
+	// PendingRebootMachineCount is the number of nodes with changes that
+	// take effect at their next boot. AMCO never reboots a node.
+	PendingRebootMachineCount int32 `json:"pendingRebootMachineCount"`
+	// ReprovisionRequiredMachineCount is the number of nodes with items that
+	// cannot converge in place.
+	ReprovisionRequiredMachineCount int32 `json:"reprovisionRequiredMachineCount"`
 
 	// Warnings lists inputs the renderer had to ignore because AIX nodes
-	// cannot honour them (for example CRI-O-only ContainerRuntimeConfig fields).
+	// cannot honour them (for example CRI-O-only ContainerRuntimeConfig
+	// fields), and every item one AIXMachineConfig overrides in another.
 	// +optional
 	Warnings []string `json:"warnings,omitempty"`
 

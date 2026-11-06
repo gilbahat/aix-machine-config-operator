@@ -17,14 +17,27 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// Absolute paths of the AIX commands this package invokes.
+// Absolute paths of the AIX commands this package invokes. Nothing else is
+// ever executed, and never through a shell.
 const (
 	CmdStartsrc = "/usr/bin/startsrc"
 	CmdStopsrc  = "/usr/bin/stopsrc"
 	CmdLssrc    = "/usr/bin/lssrc"
 	CmdRefresh  = "/usr/bin/refresh"
 	CmdKill     = "/usr/bin/kill"
+	CmdMkssys   = "/usr/bin/mkssys"
+	CmdChssys   = "/usr/bin/chssys"
+	CmdRmssys   = "/usr/bin/rmssys"
 	CmdOslevel  = "/usr/bin/oslevel"
+	CmdWho      = "/usr/bin/who"
+	CmdLsitab   = "/usr/sbin/lsitab"
+	CmdMkitab   = "/usr/sbin/mkitab"
+	CmdChitab   = "/usr/sbin/chitab"
+	CmdRmitab   = "/usr/sbin/rmitab"
+	CmdLsdev    = "/usr/sbin/lsdev"
+	CmdLsattr   = "/usr/sbin/lsattr"
+	CmdChdev    = "/usr/sbin/chdev"
+	CmdBosboot  = "/usr/sbin/bosboot"
 )
 
 // Runner executes an AIX command and returns its combined stdout and stderr.
@@ -50,7 +63,8 @@ func (e *CommandError) Error() string {
 func (e *CommandError) Unwrap() error { return e.Err }
 
 // ExecRunner runs commands on the local host with a C locale, so that the
-// output parsed by this package is not translated.
+// output parsed by this package is not translated, and in UTC, so that the
+// times it prints (who -b) do not depend on the host's time zone.
 type ExecRunner struct{}
 
 // Run implements Runner.
@@ -62,7 +76,7 @@ func (r ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byt
 func (ExecRunner) RunWithInput(ctx context.Context, input []byte, name string, args ...string) ([]byte, error) {
 	klog.V(2).Infof("aix: running %s %s", name, strings.Join(args, " "))
 	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // fixed absolute command paths
-	cmd.Env = append(os.Environ(), "LANG=C", "LC_ALL=C")
+	cmd.Env = append(os.Environ(), "LANG=C", "LC_ALL=C", "TZ=UTC0")
 	if input != nil {
 		cmd.Stdin = bytes.NewReader(input)
 	}

@@ -502,3 +502,57 @@ func TestOrphanedCordonIsReleased(t *testing.T) {
 	assert.False(t, h.node("aix1").Spec.Unschedulable)
 	assert.NotContains(t, h.node("aix1").Annotations, nodestate.CordonedByAnnotation)
 }
+
+func TestNodeConditionsFromAgentReports(t *testing.T) {
+	n := aixNode("aix1")
+	n.Annotations[nodestate.PendingRebootAnnotation] = `["tunable:no:ipqmaxlen"]`
+	n.Annotations[nodestate.ReprovisionAnnotation] = `[{"item":"device:fcs1:num_cmd_elems","reason":"device fcs1 does not exist on this node"}]`
+	n.Annotations[nodestate.BosbootAnnotation] = `{"state":"Rebuilt","time":"2026-11-06T08:00:00Z"}`
+	n.Annotations[nodestate.BootTimeAnnotation] = "2026-11-01T07:21:00Z"
+	n.Status.Conditions = append(n.Status.Conditions, corev1.NodeCondition{Type: "MemoryPressure", Status: corev1.ConditionFalse})
+	h := newHarness(t, n)
+	h.addPool(defaultPool())
+	_, err := h.op.syncNode(context.Background(), "aix1")
+	require.NoError(t, err)
+
+	got := map[corev1.NodeConditionType]corev1.NodeCondition{}
+	for _, c := range h.node("aix1").Status.Conditions {
+		got[c.Type] = c
+	}
+	assert.Equal(t, corev1.ConditionTrue, got[nodestate.ConditionRebootRequired].Status)
+	assert.Contains(t, got[nodestate.ConditionRebootRequired].Message, "tunable:no:ipqmaxlen")
+	assert.Contains(t, got[nodestate.ConditionRebootRequired].Message, "boot image was rebuilt")
+	assert.Contains(t, got[nodestate.ConditionRebootRequired].Message, "Up since 2026-11-01T07:21:00Z")
+	assert.Equal(t, corev1.ConditionTrue, got[nodestate.ConditionReprovisionRequired].Status)
+	assert.Contains(t, got[nodestate.ConditionReprovisionRequired].Message, "device fcs1 does not exist")
+	assert.Equal(t, corev1.ConditionFalse, got[nodestate.ConditionConfigDrift].Status)
+	assert.Contains(t, got, corev1.NodeConditionType("MemoryPressure"), "the kubelet's conditions are kept")
+
+	h.sync("aix")
+	p := h.pool("aix")
+	assert.Equal(t, int32(1), p.Status.PendingRebootMachineCount)
+	assert.Equal(t, int32(1), p.Status.ReprovisionRequiredMachineCount)
+}
+
+func TestHostItemDrainPolicy(t *testing.T) {
+	h := newHarness(t, aixNode("aix1"))
+	p := defaultPool()
+	p.Spec.ConfigSelector = &metav1.LabelSelector{MatchLabels: map[string]string{amcov1alpha1.RoleLabel: "aix"}}
+	h.addPool(p)
+	mcs := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	h.op.machineConfigIndexer = mcs
+	updateAll(h, "aix", "aix1")
+	h.drainer.drained = nil
+
+	mc := &amcov1alpha1.AIXMachineConfig{ObjectMeta: metav1.ObjectMeta{Name: "50-net", Labels: map[string]string{amcov1alpha1.RoleLabel: "aix"}},
+		Spec: amcov1alpha1.AIXMachineConfigSpec{Tunables: []amcov1alpha1.TunableSpec{{Command: "no", Name: "tcp_sendspace", Value: intstr.FromInt32(262144)}}}}
+	require.NoError(t, mcs.Add(mc))
+	updateAll(h, "aix", "aix1")
+	assert.Empty(t, h.drainer.drained, "a tunable without drain: true is applied in place")
+
+	mc = mc.DeepCopy()
+	mc.Spec.Tunables[0].Drain = true
+	require.NoError(t, mcs.Update(mc))
+	updateAll(h, "aix", "aix1")
+	assert.Equal(t, []string{"aix1"}, h.drainer.drained, "drain: true drains")
+}

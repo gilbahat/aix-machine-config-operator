@@ -164,12 +164,16 @@ func (o *Operator) startUpdate(ctx context.Context, st *poolSync, node *corev1.N
 	}
 	o.mu.Unlock()
 
-	plan, err := o.planFor(node, target)
+	changes, drain, err := o.planFor(node, target)
 	if err != nil {
 		return 0, err
 	}
-	klog.Infof("pool %s: updating node %s from %q to %s (%s)", st.pool.Name, node.Name, nodestate.Current(node), target, plan)
-	if !plan.Drain {
+	how := "in place"
+	if drain {
+		how = "after a drain"
+	}
+	klog.Infof("pool %s: updating node %s from %q to %s, %d item(s) %s", st.pool.Name, node.Name, nodestate.Current(node), target, len(changes), how)
+	if !drain {
 		return 0, o.setNodeAnnotations(ctx, node.Name, map[string]interface{}{nodestate.DesiredConfigAnnotation: target})
 	}
 
@@ -219,22 +223,23 @@ func (o *Operator) cordonAndDrain(ctx context.Context, name string, target strin
 	return o.setNodeAnnotations(ctx, node.Name, map[string]interface{}{nodestate.DesiredConfigAnnotation: target})
 }
 
-// planFor works out what moving node to target involves. When the node's
-// current config is unknown (a new node, or one whose config was garbage
-// collected) the plan assumes every file changes.
-func (o *Operator) planFor(node *corev1.Node, target string) (rendered.Plan, error) {
+// planFor works out which items moving node to target changes, and whether
+// one of them asks for a drain. When the node's current config is unknown (a
+// new node, or one whose config was garbage collected) every item counts as
+// changed.
+func (o *Operator) planFor(node *corev1.Node, target string) ([]string, bool, error) {
 	to, err := o.renderedConfig(target)
 	if err != nil {
-		return rendered.Plan{}, err
+		return nil, false, err
 	}
 	if to == nil {
-		return rendered.Plan{}, fmt.Errorf("rendered config %s not found", target)
+		return nil, false, fmt.Errorf("rendered config %s not found", target)
 	}
 	from, err := o.renderedConfig(nodestate.Current(node))
 	if err != nil {
-		return rendered.Plan{}, err
+		return nil, false, err
 	}
-	return rendered.Diff(from, to), nil
+	return rendered.Changes(from, to), rendered.DrainNeeded(from, to), nil
 }
 
 // reportDrainFailures copies the pool's drain failures into st. Failures are

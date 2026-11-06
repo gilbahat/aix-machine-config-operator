@@ -168,6 +168,14 @@ func (o *Operator) render(pool *amcov1alpha1.AIXConfigPool) (*render.Result, err
 	sortByName(in.ImageTagMirrorSets, func(x *configv1.ImageTagMirrorSet) string { return x.Name })
 	sortByName(in.KubeletConfigs, func(x *mcfgv1.KubeletConfig) string { return x.Name })
 	sortByName(in.ContainerRuntimeConfigs, func(x *mcfgv1.ContainerRuntimeConfig) string { return x.Name })
+	if o.machineConfigIndexer != nil {
+		for _, obj := range o.machineConfigIndexer.List() {
+			if mc, ok := obj.(*amcov1alpha1.AIXMachineConfig); ok {
+				in.MachineConfigs = append(in.MachineConfigs, mc)
+			}
+		}
+		sortByName(in.MachineConfigs, func(x *amcov1alpha1.AIXMachineConfig) string { return x.Name })
+	}
 	return render.Render(in)
 }
 

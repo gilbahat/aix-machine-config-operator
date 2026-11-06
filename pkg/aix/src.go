@@ -69,7 +69,11 @@ func ParseLssrc(out []byte) (SubsystemStatus, error) {
 
 // subsystemNameRE limits names to what mkssys accepts, so a name can never
 // be taken for an option of an SRC command.
-var subsystemNameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,29}$`)
+var subsystemNameRE = regexp.MustCompile(SubsystemNamePattern)
+
+// SubsystemNamePattern is the pattern SRC subsystem and group names must
+// match; the CRD schema uses the same pattern.
+const SubsystemNamePattern = `^[A-Za-z0-9][A-Za-z0-9_.-]{0,29}$`
 
 // ValidateSubsystemName rejects names SRC would not accept.
 func ValidateSubsystemName(name string) error {

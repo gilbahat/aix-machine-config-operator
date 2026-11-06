@@ -7,6 +7,10 @@
 // ImageTagMirrorSets, ContainerRuntimeConfigs and KubeletConfigs. Where the MCO
 // writes CRI-O and systemd files, AMCO writes their containerd-aix and AIX
 // kubelet equivalents.
+//
+// On top of that plumbing come the AIXMachineConfigs the pool selects: host
+// configuration (files, SRC subsystems, inittab entries, tunables, device
+// attributes) merged in name order.
 package render
 
 import (
@@ -39,6 +43,9 @@ type Inputs struct {
 	ImageTagMirrorSets      []*configv1.ImageTagMirrorSet
 	ContainerRuntimeConfigs []*mcfgv1.ContainerRuntimeConfig
 	KubeletConfigs          []*mcfgv1.KubeletConfig
+	// MachineConfigs are filtered by the pool's configSelector and merged
+	// in name order.
+	MachineConfigs []*amcov1alpha1.AIXMachineConfig
 }
 
 // Result is a rendered config plus anything the renderer had to ignore.
@@ -92,6 +99,16 @@ func Render(in Inputs) (*Result, error) {
 		return nil, fmt.Errorf("rendering KubeletConfig: %w", err)
 	}
 	res.add(kubelet)
+	res.Warnings = append(res.Warnings, warnings...)
+
+	mcs, err := selectMachineConfigs(in.Pool, in.MachineConfigs)
+	if err != nil {
+		return nil, err
+	}
+	warnings, err = mergeMachineConfigs(res.Config, mcs)
+	if err != nil {
+		return nil, err
+	}
 	res.Warnings = append(res.Warnings, warnings...)
 
 	if err := res.Config.Validate(); err != nil {

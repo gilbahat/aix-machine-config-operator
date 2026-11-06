@@ -24,6 +24,7 @@ func (o *Operator) computeStatus(st *poolSync) amcov1alpha1.AIXConfigPoolStatus 
 	status.RenderedConfig = st.target
 	status.MachineCount = int32(len(st.nodes))
 	status.UpdatedMachineCount, status.ReadyMachineCount, status.UnavailableMachineCount, status.DegradedMachineCount = 0, 0, 0, 0
+	status.PendingRebootMachineCount, status.ReprovisionRequiredMachineCount = 0, 0
 
 	var degraded []string
 	for _, n := range st.nodes {
@@ -36,6 +37,12 @@ func (o *Operator) computeStatus(st *poolSync) amcov1alpha1.AIXConfigPoolStatus 
 		}
 		if o.unavailable(n, st.target) {
 			status.UnavailableMachineCount++
+		}
+		if len(nodestate.PendingReboot(n)) > 0 {
+			status.PendingRebootMachineCount++
+		}
+		if len(nodestate.Reprovision(n)) > 0 {
+			status.ReprovisionRequiredMachineCount++
 		}
 		if nodestate.State(n) == nodestate.StateDegraded {
 			status.DegradedMachineCount++
