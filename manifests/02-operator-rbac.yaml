@@ -13,6 +13,10 @@ rules:
 - apiGroups: [""]
   resources: [nodes]
   verbs: [get, list, watch, patch, update]
+# AIXRebootRequired, AIXReprovisionRequired and AIXConfigDrift node conditions.
+- apiGroups: [""]
+  resources: [nodes/status]
+  verbs: [patch]
 # Draining.
 - apiGroups: [""]
   resources: [pods]
@@ -33,6 +37,9 @@ rules:
 - apiGroups: [amco.reuna-labs.io]
   resources: [aixconfigpools/status]
   verbs: [update]
+- apiGroups: [amco.reuna-labs.io]
+  resources: [aixmachineconfigs]
+  verbs: [get, list, watch]
 # Inputs (read only): the same objects the stock MCO renders from.
 - apiGroups: [machineconfiguration.openshift.io]
   resources: [controllerconfigs, kubeletconfigs, containerruntimeconfigs]

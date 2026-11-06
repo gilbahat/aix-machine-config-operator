@@ -1,0 +1,35 @@
+# Who may write AIXMachineConfigs.
+#
+# An AIXMachineConfig runs as root on every AIX node it reaches: subsystem
+# definitions and inittab entries start arbitrary programs, files can replace
+# any non-reserved file, and tunables and device attributes change the
+# kernel and adapters. Creating or changing one is therefore equivalent to
+# cluster-admin on those nodes, exactly like a MachineConfig on RHCOS.
+#
+# This role is deliberately NOT aggregated into the admin, edit or view
+# roles, so by default only cluster-admin can write configs. Bind it only to
+# the people and automation you would give cluster-admin.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aix-machine-config-editor
+  annotations:
+    amco.reuna-labs.io/privilege: cluster-admin-equivalent
+rules:
+- apiGroups: [amco.reuna-labs.io]
+  resources: [aixmachineconfigs]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [amco.reuna-labs.io]
+  resources: [aixconfigpools]
+  verbs: [get, list, watch, update, patch]
+---
+# Read access to configs and pools. Configs may hold sensitive file
+# contents, so this is not aggregated into view either.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aix-machine-config-reader
+rules:
+- apiGroups: [amco.reuna-labs.io]
+  resources: [aixmachineconfigs, aixconfigpools]
+  verbs: [get, list, watch]

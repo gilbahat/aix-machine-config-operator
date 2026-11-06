@@ -2,8 +2,11 @@
 # RBAC can only grant "patch nodes" as a whole, so without this policy a
 # token stolen from one AIX node could remove taints, uncordon nodes or fake
 # another node's update state. With it, the agent may only change its own
-# reporting annotations (currentConfig, state, reason, agentVersion, osLevel);
-# spec (cordon, taints), labels and every other annotation stay as they were.
+# reporting annotations (currentConfig, state, reason, agentVersion, osLevel,
+# pendingReboot, reprovisionRequired, drift, bootTime, bosboot); spec
+# (cordon, taints), labels and every other annotation stay as they were. The
+# agent's RBAC has no nodes/status access, so it cannot set node conditions;
+# the operator turns its reports into conditions.
 #
 # All AIX nodes share one token, so this does not stop one node's agent from
 # writing another AIX node's annotations. Issue one token per node and bind
@@ -27,7 +30,9 @@ spec:
   - name: allowed
     expression: >-
       ['amco.reuna-labs.io/currentConfig', 'amco.reuna-labs.io/state', 'amco.reuna-labs.io/reason',
-       'amco.reuna-labs.io/agentVersion', 'amco.reuna-labs.io/osLevel']
+       'amco.reuna-labs.io/agentVersion', 'amco.reuna-labs.io/osLevel',
+       'amco.reuna-labs.io/pendingReboot', 'amco.reuna-labs.io/reprovisionRequired',
+       'amco.reuna-labs.io/drift', 'amco.reuna-labs.io/bootTime', 'amco.reuna-labs.io/bosboot']
   - name: newAnn
     expression: "has(object.metadata.annotations) ? object.metadata.annotations : {}"
   - name: oldAnn

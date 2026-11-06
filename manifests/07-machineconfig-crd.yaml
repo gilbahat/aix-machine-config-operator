@@ -1,0 +1,228 @@
+# AIXMachineConfig: host configuration for AIX nodes. Pools select configs
+# with spec.configSelector. Creating one is equivalent to cluster-admin on
+# every AIX node (see 08-machineconfig-rbac.yaml).
+#
+# The name patterns below must match the ones the operator and agent enforce
+# (pkg/aix, pkg/rendered); pkg/apis/amco/v1alpha1/crd_test.go checks that.
+# Tunable and device values are int-or-string, which the schema cannot bound
+# cheaply; the operator rejects bad values (RenderDegraded) and so does the
+# agent.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: aixmachineconfigs.amco.reuna-labs.io
+spec:
+  group: amco.reuna-labs.io
+  scope: Cluster
+  names:
+    kind: AIXMachineConfig
+    listKind: AIXMachineConfigList
+    plural: aixmachineconfigs
+    singular: aixmachineconfig
+    shortNames: [amc]
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    additionalPrinterColumns:
+    - name: Age
+      type: date
+      jsonPath: .metadata.creationTimestamp
+    schema:
+      openAPIV3Schema:
+        type: object
+        description: Host configuration for AIX nodes, converged in place by the AMCO agent. The agent never reboots a node.
+        properties:
+          apiVersion: {type: string}
+          kind: {type: string}
+          metadata: {type: object}
+          spec:
+            type: object
+            x-kubernetes-validations:
+            - rule: '!has(self.kernelUpdate)'
+              message: kernelUpdate is not yet supported
+            properties:
+              kernelUpdate:
+                description: Reserved for operator-coordinated kernel updates (Live Kernel Update). Not yet supported; any value is rejected.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+              files:
+                type: array
+                maxItems: 256
+                x-kubernetes-list-type: map
+                x-kubernetes-list-map-keys: [path]
+                items:
+                  type: object
+                  required: [path, contents]
+                  x-kubernetes-validations:
+                  - rule: '!self.path.contains("/../") && !self.path.endsWith("/..") && !self.path.contains("//") && !self.path.endsWith("/")'
+                    message: path must be absolute and clean
+                  - rule: >-
+                      !(self.path in ["/etc/inittab", "/etc/amco", "/opt/amco", "/etc/tunables",
+                      "/etc/kubernetes/kubelet.conf", "/etc/kubernetes/kubelet-ca.crt"] ||
+                      self.path.startsWith("/etc/amco/") || self.path.startsWith("/opt/amco/") ||
+                      self.path.startsWith("/etc/tunables/") || self.path.startsWith("/etc/containerd/certs.d/") ||
+                      self.path.startsWith("/etc/containerd/conf.d/") || self.path.startsWith("/var/ssl/certs/amco-"))
+                    message: path is reserved (AMCO renders it, keeps its own state there, or manages it through commands)
+                  - rule: has(self.contents.inline) != has(self.contents.base64)
+                    message: set exactly one of contents.inline and contents.base64
+                  properties:
+                    path:
+                      type: string
+                      pattern: '^/[^\x00\n]*$'
+                      maxLength: 1024
+                    contents:
+                      type: object
+                      properties:
+                        inline:
+                          type: string
+                          maxLength: 262144
+                        base64:
+                          type: string
+                          format: byte
+                          maxLength: 349528
+                    mode:
+                      description: Permission bits (0 to 0777); defaults to 0644.
+                      type: integer
+                      minimum: 0
+                      maximum: 511
+                    owner:
+                      type: string
+                      pattern: '^([a-z_][a-z0-9_.-]{0,31}|[0-9]{1,10})$'
+                    group:
+                      type: string
+                      pattern: '^([a-z_][a-z0-9_.-]{0,31}|[0-9]{1,10})$'
+                    onChange:
+                      type: array
+                      maxItems: 16
+                      items:
+                        type: object
+                        required: [subsystem, action]
+                        properties:
+                          subsystem:
+                            type: string
+                            pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{0,29}$'
+                          action:
+                            type: string
+                            enum: [Restart, Refresh]
+                    drain: {type: boolean}
+                    required: {type: boolean}
+              subsystems:
+                type: array
+                maxItems: 128
+                x-kubernetes-list-type: map
+                x-kubernetes-list-map-keys: [name]
+                items:
+                  type: object
+                  required: [name]
+                  x-kubernetes-validations:
+                  - rule: has(self.state) || has(self.definition)
+                    message: set a state, a definition, or both
+                  - rule: self.name != "amco-agent"
+                    message: amco-agent is AMCO's own agent and cannot be managed
+                  properties:
+                    name:
+                      type: string
+                      pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{0,29}$'
+                    state:
+                      type: string
+                      enum: [Active, Inoperative]
+                    definition:
+                      type: object
+                      required: [path]
+                      properties:
+                        path:
+                          type: string
+                          pattern: '^/[^\x00\n:]*$'
+                          maxLength: 1024
+                        arguments:
+                          type: string
+                          pattern: '^[^\x00\n\r:]*$'
+                          maxLength: 1024
+                        uid: {type: integer, minimum: 0}
+                        stdin: {type: string, pattern: '^/[^\x00\n:]*$'}
+                        stdout: {type: string, pattern: '^/[^\x00\n:]*$'}
+                        stderr: {type: string, pattern: '^/[^\x00\n:]*$'}
+                        respawn: {type: boolean}
+                        multipleInstances: {type: boolean}
+                        contact:
+                          type: string
+                          enum: [Signal, Socket]
+                        stopSignal: {type: integer, minimum: 1, maximum: 64}
+                        forceSignal: {type: integer, minimum: 1, maximum: 64}
+                        waitSeconds: {type: integer, minimum: 0, maximum: 3600}
+                        group:
+                          type: string
+                          pattern: '^[A-Za-z0-9][A-Za-z0-9_.-]{0,29}$'
+                    drain: {type: boolean}
+                    required: {type: boolean}
+              inittab:
+                type: array
+                maxItems: 64
+                x-kubernetes-list-type: map
+                x-kubernetes-list-map-keys: [identifier]
+                items:
+                  type: object
+                  required: [identifier, runLevel, action, command]
+                  x-kubernetes-validations:
+                  - rule: self.identifier != "amco-agent"
+                    message: the amco-agent entry starts AMCO's own agent and cannot be managed
+                  properties:
+                    identifier:
+                      type: string
+                      pattern: '^[A-Za-z0-9_][A-Za-z0-9_-]{0,13}$'
+                    runLevel:
+                      type: string
+                      pattern: '^[0-9a-cA-CsSmM]{1,20}$'
+                    action:
+                      type: string
+                      enum: [boot, bootwait, hold, initdefault, "off", once, ondemand, powerfail, powerwait, respawn, sysinit, wait]
+                    command:
+                      type: string
+                      pattern: '^[^\x00\n\r]+$'
+                      maxLength: 1024
+                    drain: {type: boolean}
+                    required: {type: boolean}
+              tunables:
+                type: array
+                maxItems: 256
+                x-kubernetes-list-type: map
+                x-kubernetes-list-map-keys: [command, name]
+                items:
+                  type: object
+                  required: [command, name, value]
+                  properties:
+                    command:
+                      type: string
+                      enum: ["no", vmo, ioo, schedo, nfso, raso]
+                    name:
+                      type: string
+                      pattern: '^[a-z][a-z0-9_]{0,63}$'
+                    value:
+                      description: A decimal integer. Checked by the operator (RenderDegraded) and the agent.
+                      x-kubernetes-int-or-string: true
+                    drain: {type: boolean}
+                    required: {type: boolean}
+              deviceAttributes:
+                type: array
+                maxItems: 256
+                x-kubernetes-list-type: map
+                x-kubernetes-list-map-keys: [device, attribute]
+                items:
+                  type: object
+                  required: [device, attribute, value]
+                  properties:
+                    device:
+                      type: string
+                      pattern: '^[a-z][a-z0-9_]{0,15}$'
+                    attribute:
+                      type: string
+                      pattern: '^[a-z][a-z0-9_]{0,31}$'
+                    value:
+                      description: One token of letters, digits and _.:/+@- (at most 128). Checked by the operator (RenderDegraded) and the agent.
+                      x-kubernetes-int-or-string: true
+                    onBusy:
+                      type: string
+                      enum: [Defer, Fail]
+                    drain: {type: boolean}
+                    required: {type: boolean}
