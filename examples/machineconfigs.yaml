@@ -1,0 +1,109 @@
+# Host configuration examples. The default pool (manifests/05-pool.yaml)
+# merges every AIXMachineConfig labelled amco.reuna-labs.io/role: aix, in
+# name order. The agent converges each item in place and never reboots.
+---
+# sshd hardening: the file is written as root:system 0600 and sshd is sent a
+# refresh (sshd only takes signals, so AMCO sends SIGHUP), which makes it
+# re-read its configuration without dropping sessions.
+apiVersion: amco.reuna-labs.io/v1alpha1
+kind: AIXMachineConfig
+metadata:
+  name: 50-sshd
+  labels:
+    amco.reuna-labs.io/role: aix
+spec:
+  files:
+  - path: /etc/ssh/sshd_config
+    mode: 0600
+    owner: root
+    group: system
+    contents:
+      inline: |
+        # Managed by AMCO (AIXMachineConfig 50-sshd).
+        Protocol 2
+        PermitRootLogin no
+        PasswordAuthentication no
+        ClientAliveInterval 300
+        Subsystem sftp /usr/sbin/sftp-server
+    onChange:
+    - subsystem: sshd
+      action: Refresh
+  subsystems:
+  - name: sshd
+    state: Active
+---
+# Network buffers. tcp_sendspace and tcp_recvspace are Connect tunables:
+# set with no -p (now and at boot), effective for new connections. ipqmaxlen
+# is a Reboot tunable: set with no -r and reported as pending reboot.
+apiVersion: amco.reuna-labs.io/v1alpha1
+kind: AIXMachineConfig
+metadata:
+  name: 60-network-tunables
+  labels:
+    amco.reuna-labs.io/role: aix
+spec:
+  tunables:
+  - command: "no"
+    name: tcp_sendspace
+    value: 262144
+  - command: "no"
+    name: tcp_recvspace
+    value: 262144
+  - command: "no"
+    name: ipqmaxlen
+    value: 512
+---
+# Fibre Channel adapter queue depth. The adapter is usually busy (its disks
+# are open), so chdev is deferred with -P and reported as pending reboot.
+# required: false (the default) means an LPAR without fcs0 reports
+# ReprovisionRequired for this item instead of failing the whole config.
+apiVersion: amco.reuna-labs.io/v1alpha1
+kind: AIXMachineConfig
+metadata:
+  name: 70-fc-queue-depth
+  labels:
+    amco.reuna-labs.io/role: aix
+spec:
+  deviceAttributes:
+  - device: fcs0
+    attribute: num_cmd_elems
+    value: 2048
+    onBusy: Defer
+  - device: fcs0
+    attribute: max_xfer_size
+    value: "0x200000"
+    onBusy: Defer
+---
+# An application subsystem started at boot from one inittab entry. AMCO
+# defines the subsystem (mkssys), adds only this inittab entry (mkitab) and
+# starts the subsystem now; removing this config removes all three again.
+apiVersion: amco.reuna-labs.io/v1alpha1
+kind: AIXMachineConfig
+metadata:
+  name: 80-app-agent
+  labels:
+    amco.reuna-labs.io/role: aix
+spec:
+  subsystems:
+  - name: appagent
+    state: Active
+    definition:
+      path: /opt/app/bin/appagent
+      arguments: "-f /etc/appagent.conf"
+      uid: 0
+      respawn: true
+      stdout: /var/log/appagent.log
+      stderr: /var/log/appagent.log
+  inittab:
+  - identifier: appagent
+    runLevel: "2"
+    action: once
+    command: /usr/bin/startsrc -s appagent >/dev/console 2>&1
+  files:
+  - path: /etc/appagent.conf
+    contents:
+      inline: |
+        endpoint=https://collector.example.com
+    onChange:
+    - subsystem: appagent
+      action: Restart

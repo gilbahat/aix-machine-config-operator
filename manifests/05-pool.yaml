@@ -4,6 +4,7 @@
 #   machineConfigPoolSelector:
 #     matchLabels:
 #       pools.amco.reuna-labs.io/aix: ""
+# and it merges the AIXMachineConfigs labelled amco.reuna-labs.io/role: aix.
 apiVersion: amco.reuna-labs.io/v1alpha1
 kind: AIXConfigPool
 metadata:
@@ -12,3 +13,6 @@ metadata:
     pools.amco.reuna-labs.io/aix: ""
 spec:
   maxUnavailable: 1
+  configSelector:
+    matchLabels:
+      amco.reuna-labs.io/role: aix

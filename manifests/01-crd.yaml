@@ -42,6 +42,12 @@ spec:
     - name: DegradedMachineCount
       type: integer
       jsonPath: .status.degradedMachineCount
+    - name: PendingReboot
+      type: integer
+      jsonPath: .status.pendingRebootMachineCount
+    - name: Reprovision
+      type: integer
+      jsonPath: .status.reprovisionRequiredMachineCount
     - name: Age
       type: date
       jsonPath: .metadata.creationTimestamp
@@ -84,6 +90,25 @@ spec:
               paused:
                 description: Stops new nodes from starting an update.
                 type: boolean
+              configSelector:
+                description: Selects the AIXMachineConfigs merged into the pool's configuration, as machineConfigSelector does for a MachineConfigPool. Unset selects none.
+                type: object
+                x-kubernetes-map-type: atomic
+                properties:
+                  matchLabels:
+                    type: object
+                    additionalProperties: {type: string}
+                  matchExpressions:
+                    type: array
+                    items:
+                      type: object
+                      required: [key, operator]
+                      properties:
+                        key: {type: string}
+                        operator: {type: string}
+                        values:
+                          type: array
+                          items: {type: string}
           status:
             type: object
             properties:
@@ -94,6 +119,8 @@ spec:
               readyMachineCount: {type: integer, format: int32}
               unavailableMachineCount: {type: integer, format: int32}
               degradedMachineCount: {type: integer, format: int32}
+              pendingRebootMachineCount: {type: integer, format: int32}
+              reprovisionRequiredMachineCount: {type: integer, format: int32}
               warnings:
                 type: array
                 items: {type: string}
