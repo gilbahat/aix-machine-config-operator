@@ -29,7 +29,7 @@ const (
 	CmdChssys   = "/usr/bin/chssys"
 	CmdRmssys   = "/usr/bin/rmssys"
 	CmdOslevel  = "/usr/bin/oslevel"
-	CmdWho      = "/usr/bin/who"
+	CmdPs       = "/usr/bin/ps"
 	CmdLsitab   = "/usr/sbin/lsitab"
 	CmdMkitab   = "/usr/sbin/mkitab"
 	CmdChitab   = "/usr/sbin/chitab"

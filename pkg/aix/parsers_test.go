@@ -12,7 +12,9 @@ import (
 // Sample outputs. Formats that could not be confirmed against a live AIX
 // host are listed under "Verify on hardware" in the README.
 const (
-	sampleWhoBoot = "   .        system boot  Nov 06 07:21\n"
+	// ps -o etime= -p 1: init's elapsed time, [[dd-]hh:]mm:ss (366 days,
+	// 1 hour 39 minutes before 2027-11-07 09:00 UTC).
+	sampleEtime = "366-01:39:00\n"
 
 	sampleLsitab = "amcotest:2:once:/usr/bin/startsrc -s amcotest >/dev/console 2>&1\n"
 
@@ -36,19 +38,28 @@ sshd_adm::-D -f /etc/ssh/sshd_config_adm:/usr/sbin/sshd:0:0:/dev/console:/dev/co
 `
 )
 
-func TestParseWhoBoot(t *testing.T) {
-	now := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
-	got, err := ParseWhoBoot([]byte(sampleWhoBoot), now)
+func TestBootTime(t *testing.T) {
+	for in, want := range map[string]time.Duration{
+		"   05:07\n":      5*time.Minute + 7*time.Second,
+		"02:05:07":        2*time.Hour + 5*time.Minute + 7*time.Second,
+		" 412-02:05:07\n": 412*24*time.Hour + 2*time.Hour + 5*time.Minute + 7*time.Second,
+	} {
+		got, err := ParseElapsed(in)
+		require.NoError(t, err, in)
+		assert.Equal(t, want, got, in)
+	}
+	for _, bad := range []string{"", "12", "a:b", "1-2-3:4"} {
+		_, err := ParseElapsed(bad)
+		assert.Error(t, err, bad)
+	}
+	now := time.Date(2027, 11, 7, 9, 0, 0, 0, time.UTC)
+	r := newFakeRunner().on(CmdPs+" -o etime= -p 1", sampleEtime, nil)
+	boot, err := BootTime(context.Background(), r, now)
 	require.NoError(t, err)
-	assert.Equal(t, time.Date(2026, 11, 6, 7, 21, 0, 0, time.UTC), got)
+	assert.Equal(t, time.Date(2026, 11, 6, 7, 21, 0, 0, time.UTC), boot, "uptimes over a year are unambiguous")
 
-	// Booted last December, read in January.
-	got, err = ParseWhoBoot([]byte("   .        system boot  Dec 30 23:59\n"), time.Date(2027, 1, 2, 0, 0, 0, 0, time.UTC))
-	require.NoError(t, err)
-	assert.Equal(t, 2026, got.Year())
-
-	_, err = ParseWhoBoot([]byte("nothing\n"), now)
-	assert.Error(t, err)
+	assert.True(t, SameBoot("2026-11-06T07:21:00Z", "2026-11-06T07:21:40Z"))
+	assert.False(t, SameBoot("2026-11-06T07:21:00Z", "2026-11-06T10:21:00Z"))
 }
 
 func TestParseLsitab(t *testing.T) {

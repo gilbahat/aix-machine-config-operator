@@ -142,7 +142,9 @@ false) and `required` (see below).
   config wins, and the pool lists each override as a warning.
 * **Convergence.** For each item the agent reads the live state, changes only
   what differs and verifies the result. Re-applying an applied config runs
-  no command that changes anything.
+  no command that changes anything. Retrying a failed apply only runs what
+  is still owed: services whose restart already succeeded are not restarted
+  again.
 * **Outcomes.** Each item ends `Live` (applied and verified),
   `ServiceRestart` (applied, then a subsystem restarted or refreshed),
   `PendingReboot` (applied persistently, effective at the next boot) or
@@ -170,15 +172,22 @@ false) and `required` (see below).
   subsystem restarts it. `onChange` actions only run on active subsystems
   and are skipped for subsystems just started.
 * **Baselines and removal.** Before AMCO first manages an item, the agent
-  records its original state: a file's content (as `<path>.amco-orig`),
-  mode and owner, or its absence; the subsystem definition and state; the
-  inittab entry; the tunable or attribute value. When the item leaves the
-  merged config it is restored by the same rules as applying, so restoring a
-  Reboot tunable is itself PendingReboot.
+  records its original state: a file's content (kept under
+  `/etc/amco/backups/<path>`), mode and owner, or its absence; the subsystem
+  state, and its definition if the item manages it; the inittab entry; the
+  tunable or attribute value. When the item leaves the merged config, even
+  one that never finished applying, it is restored by the same rules as
+  applying, so restoring a Reboot tunable is itself PendingReboot. An item
+  whose original state AMCO could not write back (for example an empty
+  device attribute) is not managed at all and is reported as
+  ReprovisionRequired; a restore that fails is reported as drift and given
+  up rather than blocking later configs.
 * **After a reboot**, whoever performed it, the agent compares the boot time
-  (`who -b`, as the AIX kubelet's `GetBootTime` does) with the boot during
-  which each pending item was set, and clears the items whose boot has
-  happened. The next drift check reports any that are still not effective.
+  with the boot during which each pending item was set, and clears the items
+  whose boot has happened. The next drift check reports any that are still
+  not effective. The boot time is derived from init's uptime
+  (`ps -o etime= -p 1`) rather than `who -b`, which has no year and so is
+  ambiguous on LPARs up for over a year.
 * **Reserved.** Paths AMCO renders itself, `/etc/amco`, `/opt/amco`,
   `/etc/tunables` and `/etc/inittab`, the `amco-agent` subsystem and inittab
   entry. Names (devices, attributes, tunables, subsystems, inittab
@@ -247,8 +256,10 @@ code.
    * `/etc/containerd/config.toml` imports `/etc/containerd/conf.d/*.toml`.
    * The kubelet is started with `--config /etc/kubernetes/kubelet.conf`.
 
-Existing files at managed paths are backed up as `<path>.amco-orig` and put
-back when AMCO stops managing the path.
+Existing files at managed paths are backed up under `/etc/amco/backups` and
+put back when AMCO stops managing the path. Keeping backups out of the
+original directory means nothing that scans it (an `rc.d` `S*` script, a
+`conf.d` drop-in) picks up the old copy.
 
 ### Drift
 
@@ -267,10 +278,15 @@ recover, do one of these:
   failed bosboot.
 
 Every apply is recorded as in progress before the first change, together
-with each item's baseline. An apply that fails or is interrupted (agent
-killed, service not coming back) is redone in full next time; every step
-checks the live state first, so repeating one is safe, and a subsystem that
-AMCO stopped for a restart is started again.
+with each item's baseline. Each change is preceded by a save of what it will
+owe: the subsystem restarts or refreshes, a pending-reboot entry, a needed
+bosboot. An apply that fails or is interrupted (agent killed, service not
+coming back) is simply run again: every step checks the live state first,
+owed actions are still owed, items of the unfinished config are still known
+(and restored if the next config drops them), and a subsystem that AMCO
+stopped for a restart is started again on every run until it is up. A
+failed bosboot is the exception: it is only retried by the force file or a
+new config.
 
 ### Agent safeguards
 
@@ -354,6 +370,10 @@ Other gaps:
 * Host configuration does not cover users and SSH keys, filesets and RPMs,
   ifixes, network interfaces or kernel updates yet. `kernelUpdate` is
   reserved in the API for Live Kernel Update, coordinated by the operator.
+* File contents are not secret: every selected `AIXMachineConfig` is copied
+  into the pool's rendered ConfigMap, readable by anyone who can read
+  ConfigMaps in the operator namespace and by the shared agent token. Do not
+  put secrets in configs.
 * Owner and group names are resolved from the local `/etc/passwd` and
   `/etc/group` (Go's pure `os/user`); users that only exist in LDAP need a
   numeric id.
@@ -367,10 +387,10 @@ Nothing has run on AIX yet. The parsers are unit-tested against sample
 output written from IBM documentation and published examples; these are the
 formats and behaviours to confirm on a real LPAR first:
 
-* **Command paths.** `/usr/bin/{lssrc,startsrc,stopsrc,refresh,mkssys,chssys,rmssys,who,oslevel}`,
+* **Command paths.** `/usr/bin/{lssrc,startsrc,stopsrc,refresh,mkssys,chssys,rmssys,ps,oslevel}`,
   `/usr/sbin/{lsitab,mkitab,chitab,rmitab,lsdev,lsattr,chdev,bosboot}` and
   `/usr/sbin/{no,vmo,ioo,schedo,nfso,raso}`.
-* **`who -b`** prints `.  system boot  Mon DD HH:MM` with TZ=UTC0 and no year.
+* **`ps -o etime= -p 1`** prints init's elapsed time as `[[dd-]hh:]mm:ss`.
 * **`lssrc -S -s <name>`** prints a `#`-prefixed header and a colon-separated
   row, with action, multi and contact as `-R`/`-O`, `-Q`/`-q`, `-S`/`-K`
   (confirmed from one published sample). Arguments containing `:` are

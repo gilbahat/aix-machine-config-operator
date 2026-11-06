@@ -22,8 +22,13 @@ const (
 	// degradation. It is the counterpart of the MCO's
 	// /run/machine-config-daemon-force.
 	ForceFile = "/etc/amco/force"
-	// BackupSuffix is appended to a pre-existing file AMCO takes over, so it
-	// can be restored when AMCO stops managing the path.
+	// BackupDir holds the original content of files AMCO took over, at
+	// BackupDir + <path>. Keeping backups out of the original directory
+	// means nothing scans them by accident (an rc.d S* script, a conf.d
+	// drop-in).
+	BackupDir = "/etc/amco/backups"
+	// BackupSuffix marked backups kept next to the file by agents before
+	// host configuration existed; they are still restored.
 	BackupSuffix = ".amco-orig"
 )
 
@@ -94,7 +99,10 @@ func (h Host) writeFile(p string, data []byte, mode os.FileMode) error {
 }
 
 // backupPath is where a file's original content is kept.
-func backupPath(p string) string { return p + BackupSuffix }
+func backupPath(p string) string { return BackupDir + p }
+
+// legacyBackupPath is where older agents kept it.
+func legacyBackupPath(p string) string { return p + BackupSuffix }
 
 // removeFile deletes p and prunes an emptied registry host directory.
 func (h Host) removeFile(p string) error {

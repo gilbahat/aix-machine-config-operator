@@ -545,7 +545,7 @@ func TestHostItemDrainPolicy(t *testing.T) {
 	h.drainer.drained = nil
 
 	mc := &amcov1alpha1.AIXMachineConfig{ObjectMeta: metav1.ObjectMeta{Name: "50-net", Labels: map[string]string{amcov1alpha1.RoleLabel: "aix"}},
-		Spec: amcov1alpha1.AIXMachineConfigSpec{Tunables: []amcov1alpha1.TunableSpec{{Command: "no", Name: "tcp_sendspace", Value: intstr.FromInt32(262144)}}}}
+		Spec: amcov1alpha1.AIXMachineConfigSpec{Tunables: []amcov1alpha1.TunableSpec{{Command: "no", Name: "tcp_sendspace", Value: amcov1alpha1.ItemValue("262144")}}}}
 	require.NoError(t, mcs.Add(mc))
 	updateAll(h, "aix", "aix1")
 	assert.Empty(t, h.drainer.drained, "a tunable without drain: true is applied in place")

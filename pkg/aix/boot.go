@@ -3,44 +3,63 @@ package aix
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// ParseWhoBoot extracts the boot time from `who -b` output, e.g.
-//
-//	.        system boot  Nov 06 07:21
-//
-// who prints no year and only minute precision. The year is taken from now
-// (both in UTC, which ExecRunner enforces with TZ=UTC0); a time more than a
-// day in the future must be from the previous year. This is the same source
-// and precision as the AIX kubelet's GetBootTime.
-func ParseWhoBoot(out []byte, now time.Time) (time.Time, error) {
-	const marker = "system boot"
-	for _, line := range strings.Split(string(out), "\n") {
-		i := strings.Index(line, marker)
-		if i < 0 {
-			continue
-		}
-		ts := strings.Join(strings.Fields(line[i+len(marker):]), " ")
-		now = now.UTC()
-		t, err := time.Parse("Jan 2 15:04 2006", fmt.Sprintf("%s %d", ts, now.Year()))
+// ParseElapsed parses a ps etime value, [[dd-]hh:]mm:ss.
+func ParseElapsed(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	var days int
+	if d, rest, ok := strings.Cut(s, "-"); ok {
+		n, err := strconv.Atoi(d)
 		if err != nil {
-			return time.Time{}, fmt.Errorf("unexpected who -b boot record %q: %w", ts, err)
+			return 0, fmt.Errorf("unexpected elapsed time %q", s)
 		}
-		if t.After(now.Add(24 * time.Hour)) {
-			t = t.AddDate(-1, 0, 0)
-		}
-		return t, nil
+		days, s = n, rest
 	}
-	return time.Time{}, fmt.Errorf("no system boot record in who -b output %q", strings.TrimSpace(string(out)))
+	parts := strings.Split(s, ":")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, fmt.Errorf("unexpected elapsed time %q", s)
+	}
+	var total int
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("unexpected elapsed time %q", s)
+		}
+		total = total*60 + n
+	}
+	return time.Duration(days)*24*time.Hour + time.Duration(total)*time.Second, nil
 }
 
-// BootTime returns the time the host booted, to the minute.
+// BootTime returns when the host booted: now minus the elapsed time of init
+// (`ps -o etime= -p 1`). Unlike `who -b`, which prints no year and only
+// minutes, this is unambiguous for any uptime. The result is accurate to
+// about a second plus the time ps takes; compare boot times with SameBoot.
 func BootTime(ctx context.Context, r Runner, now time.Time) (time.Time, error) {
-	out, err := r.Run(ctx, CmdWho, "-b")
+	out, err := r.Run(ctx, CmdPs, "-o", "etime=", "-p", "1")
 	if err != nil {
-		return time.Time{}, fmt.Errorf("reading boot time: %w", err)
+		return time.Time{}, fmt.Errorf("reading the boot time: %w", err)
 	}
-	return ParseWhoBoot(out, now)
+	up, err := ParseElapsed(string(out))
+	if err != nil {
+		return time.Time{}, err
+	}
+	return now.Add(-up).UTC().Truncate(time.Second), nil
+}
+
+// bootTolerance absorbs the jitter of deriving the boot time from uptime.
+const bootTolerance = 2 * time.Minute
+
+// SameBoot reports whether two boot times (RFC 3339) belong to one boot.
+func SameBoot(a, b string) bool {
+	ta, errA := time.Parse(time.RFC3339, a)
+	tb, errB := time.Parse(time.RFC3339, b)
+	if errA != nil || errB != nil {
+		return a == b
+	}
+	d := ta.Sub(tb)
+	return d < bootTolerance && d > -bootTolerance
 }

@@ -11,7 +11,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	amcov1alpha1 "github.com/gilbahat/aix-machine-config-operator/pkg/apis/amco/v1alpha1"
@@ -238,7 +237,7 @@ func TestRenderMachineConfigsMergeInNameOrder(t *testing.T) {
 			Path: "/etc/ssh/sshd_config", Contents: amcov1alpha1.FileContents{Inline: strPtr("PermitRootLogin yes\n")},
 			OnChange: []amcov1alpha1.SubsystemActionSpec{{Subsystem: "sshd", Action: "Refresh"}},
 		}},
-		Tunables: []amcov1alpha1.TunableSpec{{Command: "no", Name: "tcp_sendspace", Value: intstr.FromInt32(262144)}},
+		Tunables: []amcov1alpha1.TunableSpec{{Command: "no", Name: "tcp_sendspace", Value: amcov1alpha1.ItemValue("262144")}},
 	})
 	site := machineConfig("50-site", amcov1alpha1.AIXMachineConfigSpec{
 		Files: []amcov1alpha1.FileSpec{{
@@ -246,10 +245,10 @@ func TestRenderMachineConfigsMergeInNameOrder(t *testing.T) {
 		}},
 		Subsystems:       []amcov1alpha1.SubsystemSpec{{Name: "sshd", State: "Active"}},
 		Inittab:          []amcov1alpha1.InittabSpec{{Identifier: "appd", RunLevel: "2", Action: "once", Command: "/usr/bin/startsrc -s appd"}},
-		DeviceAttributes: []amcov1alpha1.DeviceAttributeSpec{{Device: "fcs0", Attribute: "num_cmd_elems", Value: intstr.FromString("2048")}},
+		DeviceAttributes: []amcov1alpha1.DeviceAttributeSpec{{Device: "fcs0", Attribute: "num_cmd_elems", Value: amcov1alpha1.ItemValue("2048")}},
 	})
 	other := &amcov1alpha1.AIXMachineConfig{ObjectMeta: metav1.ObjectMeta{Name: "99-other-role"}, Spec: amcov1alpha1.AIXMachineConfigSpec{
-		Tunables: []amcov1alpha1.TunableSpec{{Command: "vmo", Name: "minfree", Value: intstr.FromInt32(1)}},
+		Tunables: []amcov1alpha1.TunableSpec{{Command: "vmo", Name: "minfree", Value: amcov1alpha1.ItemValue("1")}},
 	}}
 
 	res, err := Render(Inputs{Pool: selectingPool(), ControllerConfig: testCC(), MachineConfigs: []*amcov1alpha1.AIXMachineConfig{site, other, base}})
@@ -278,9 +277,9 @@ func TestRenderMachineConfigRejects(t *testing.T) {
 		"is reserved":                       {Files: []amcov1alpha1.FileSpec{{Path: "/etc/kubernetes/kubelet.conf", Contents: amcov1alpha1.FileContents{Inline: strPtr("x")}}}},
 		"exactly one of contents.inline":    {Files: []amcov1alpha1.FileSpec{{Path: "/etc/motd"}}},
 		"reserved (AMCO":                    {Files: []amcov1alpha1.FileSpec{{Path: "/etc/amco/force", Contents: amcov1alpha1.FileContents{Inline: strPtr("")}}}},
-		"not one of no, vmo":                {Tunables: []amcov1alpha1.TunableSpec{{Command: "bash", Name: "x", Value: intstr.FromInt32(1)}}},
-		"must be a decimal integer":         {Tunables: []amcov1alpha1.TunableSpec{{Command: "no", Name: "x", Value: intstr.FromString("1;reboot")}}},
-		"invalid device name":               {DeviceAttributes: []amcov1alpha1.DeviceAttributeSpec{{Device: "../x", Attribute: "a", Value: intstr.FromInt32(1)}}},
+		"not one of no, vmo":                {Tunables: []amcov1alpha1.TunableSpec{{Command: "bash", Name: "x", Value: amcov1alpha1.ItemValue("1")}}},
+		"must be a decimal integer":         {Tunables: []amcov1alpha1.TunableSpec{{Command: "no", Name: "x", Value: amcov1alpha1.ItemValue("1;reboot")}}},
+		"invalid device name":               {DeviceAttributes: []amcov1alpha1.DeviceAttributeSpec{{Device: "../x", Attribute: "a", Value: amcov1alpha1.ItemValue("1")}}},
 		"cannot be managed":                 {Subsystems: []amcov1alpha1.SubsystemSpec{{Name: "amco-agent", State: "Inoperative"}}},
 		"invalid inittab identifier":        {Inittab: []amcov1alpha1.InittabSpec{{Identifier: "-x", RunLevel: "2", Action: "once", Command: "c"}}},
 	} {

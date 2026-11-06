@@ -201,7 +201,7 @@ func apply(args []string) error {
 	if _, err := engine.ReconcileBoot(); err != nil {
 		return err
 	}
-	res, err := engine.Apply(ctx, name, cfg, *full)
+	res, err := engine.Apply(ctx, name, cfg, agent.ApplyOptions{Force: *full})
 	if err != nil {
 		return err
 	}

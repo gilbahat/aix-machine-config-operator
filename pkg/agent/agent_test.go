@@ -190,12 +190,12 @@ func TestPreexistingFileIsBackedUpAndRestored(t *testing.T) {
 	e.write(kubeletConf.Path, "handwritten\n")
 	_, err := e.roll(files(kubeletConf))
 	require.NoError(t, err)
-	assert.Equal(t, "handwritten\n", e.read(kubeletConf.Path+BackupSuffix))
+	assert.Equal(t, "handwritten\n", e.read(backupPath(kubeletConf.Path)))
 
 	_, err = e.roll(files(quayHosts))
 	require.NoError(t, err)
 	assert.Equal(t, "handwritten\n", e.read(kubeletConf.Path))
-	assert.False(t, e.exists(kubeletConf.Path+BackupSuffix))
+	assert.False(t, e.exists(backupPath(kubeletConf.Path)))
 }
 
 func TestFailedRestartIsRetried(t *testing.T) {
@@ -331,7 +331,7 @@ func TestStandaloneFilesOnly(t *testing.T) {
 	e := &Engine{Files: Host{Root: root}, NoRestart: true, Chown: func(string, int, int) error { return nil },
 		FileOwner: func(string, os.FileInfo) (int, int, bool) { return 0, 0, true }}
 	cfg := &rendered.Config{Version: rendered.FormatVersion, Pool: "aix", Files: []rendered.File{quayHosts, kubeletConf}}
-	res, err := e.Apply(context.Background(), "test", cfg, false)
+	res, err := e.Apply(context.Background(), "test", cfg, ApplyOptions{})
 	require.NoError(t, err)
 	assert.Len(t, res.Changed, 2)
 	st, err := os.Stat(filepath.Join(root, StateFile))
@@ -339,7 +339,7 @@ func TestStandaloneFilesOnly(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o600), st.Mode().Perm())
 
 	cfg.Tunables = []rendered.Tunable{{Command: "no", Name: "tcp_sendspace", Value: "1"}}
-	_, err = e.Apply(context.Background(), "test2", cfg, false)
+	_, err = e.Apply(context.Background(), "test2", cfg, ApplyOptions{})
 	assert.ErrorContains(t, err, "needs AIX commands")
 }
 
@@ -383,7 +383,7 @@ func TestHostItemsApplyIdempotentAndRestore(t *testing.T) {
 	e.h.resetCalls()
 	again := hostConfig()
 	again.Version, again.Pool = rendered.FormatVersion, "aix"
-	_, err = e.a.Engine.Apply(context.Background(), name, again, false)
+	_, err = e.a.Engine.Apply(context.Background(), name, again, ApplyOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, e.h.mutating, "re-applying an applied config changes nothing")
 	assert.NotEmpty(t, e.h.calls, "it does read the live state")

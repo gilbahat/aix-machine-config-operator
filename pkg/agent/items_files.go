@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"k8s.io/klog/v2"
 
@@ -86,18 +87,26 @@ func (r *run) applyFile(f rendered.File) error {
 		return err
 	}
 	// Keep the original content before the first change. If an earlier,
-	// interrupted apply already wrote the file, the backup exists already.
+	// interrupted apply already wrote the file, the backup exists already;
+	// if the original has been deleted since, there is nothing to keep.
 	if b, ok := r.st.Baselines[f.Key()]; ok && b.File != nil && b.File.Exists {
 		if _, err := os.Stat(r.e.Files.path(backupPath(f.Path))); errors.Is(err, fs.ErrNotExist) {
 			orig, err := os.ReadFile(r.e.Files.path(f.Path))
-			if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				orig = nil
+			} else if err != nil {
 				return fmt.Errorf("backing up %s: %w", f.Path, err)
 			}
-			if err := r.e.Files.writeFile(backupPath(f.Path), orig, os.FileMode(b.File.Mode)); err != nil {
-				return fmt.Errorf("backing up %s: %w", f.Path, err)
+			if orig != nil {
+				if err := r.e.Files.writeFile(backupPath(f.Path), orig, os.FileMode(b.File.Mode)); err != nil {
+					return fmt.Errorf("backing up %s: %w", f.Path, err)
+				}
+				klog.Infof("kept the original %s as %s", f.Path, backupPath(f.Path))
 			}
-			klog.Infof("kept the original %s as %s", f.Path, backupPath(f.Path))
 		}
+	}
+	if err := r.queueActions(f); err != nil {
+		return err
 	}
 	if err := r.e.Files.writeFile(f.Path, data, os.FileMode(f.Mode)); err != nil {
 		return err
@@ -106,45 +115,53 @@ func (r *run) applyFile(f rendered.File) error {
 		return fmt.Errorf("setting owner of %s: %w", f.Path, err)
 	}
 	klog.Infof("wrote %s", f.Path)
-	r.queueActions(f)
 	return nil
 }
 
 // restoreFile puts a file back as it was before AMCO managed it: the backup
 // is moved back with its original mode and owner, or the file is removed if
-// it did not exist. The file's actions run, since its content changed.
+// it did not exist. The file's actions are owed first, since its content
+// changes. Repeating it after a crash is safe: with the backup already moved
+// back, it only re-applies the mode and owner.
 func (r *run) restoreFile(f rendered.File, b *FileBaseline, ok bool) error {
 	full := r.e.Files.path(f.Path)
 	backup := r.e.Files.path(backupPath(f.Path))
+	if _, err := os.Stat(backup); err != nil {
+		backup = r.e.Files.path(legacyBackupPath(f.Path))
+	}
 	_, backupErr := os.Stat(backup)
+	if !ok && backupErr != nil && f.Origin != rendered.OriginAMCO {
+		klog.Warningf("%s left the config, but its original state was not recorded; leaving it in place", f.Path)
+		return nil
+	}
+	if err := r.queueActions(f); err != nil {
+		return err
+	}
 	switch {
-	case ok && b != nil && !b.Exists:
+	case ok && !b.Exists, !ok && backupErr != nil:
+		// It did not exist before (an AMCO file with no record had none).
 		if err := r.e.Files.removeFile(f.Path); err != nil {
 			return err
 		}
 		klog.Infof("removed %s (it did not exist before AMCO managed it)", f.Path)
+		return nil
 	case backupErr == nil:
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return err
+		}
 		if err := os.Rename(backup, full); err != nil {
 			return err
 		}
-		if ok && b != nil {
-			if err := os.Chmod(full, os.FileMode(b.Mode)); err != nil {
-				return err
-			}
-			if err := r.chown(full, b.UID, b.GID); err != nil {
-				return err
-			}
-		}
 		klog.Infof("restored the original %s", f.Path)
-	case !ok && f.Origin == rendered.OriginAMCO:
-		// AMCO's own file with no record of an original: it did not exist.
-		if err := r.e.Files.removeFile(f.Path); err != nil {
+	}
+	if ok {
+		if _, err := os.Stat(full); err != nil {
+			return nil // the original was deleted while AMCO managed the file
+		}
+		if err := os.Chmod(full, os.FileMode(b.Mode)); err != nil {
 			return err
 		}
-	default:
-		klog.Warningf("%s left the config, but its original content was not kept; leaving it in place", f.Path)
-		return nil
+		return r.chown(full, b.UID, b.GID)
 	}
-	r.queueActions(f)
 	return nil
 }

@@ -14,7 +14,7 @@ import (
 )
 
 // fakeHost simulates the AIX commands the agent runs: SRC, inittab,
-// tunables, devices, bosboot and who. It keeps the state those commands
+// tunables, devices and bosboot. It keeps the state those commands
 // manage, records every command line, and can simulate a reboot.
 type fakeHost struct {
 	boot       time.Time
@@ -129,8 +129,6 @@ func (h *fakeHost) RunWithInput(_ context.Context, _ []byte, name string, args .
 		}
 	}
 	switch name {
-	case aix.CmdWho:
-		return []byte("   .        system boot  " + h.boot.Format("Jan 02 15:04") + "\n"), nil
 	case aix.CmdLssrc:
 		if arg(0) == "-S" {
 			s, ok := h.subsystems[arg(2)]

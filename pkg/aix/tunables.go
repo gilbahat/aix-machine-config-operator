@@ -60,7 +60,9 @@ type TunableInfo struct {
 
 // Patterns for tunable names and values; the CRD schema uses the same patterns.
 const (
-	TunableNamePattern  = `^[a-z][a-z0-9_]{0,63}$`
+	// Names are mixed case for JFS2 (j2_maxPageReadAhead) and may contain
+	// '%' (minperm%); the value always travels inside one name=value argument.
+	TunableNamePattern  = `^[A-Za-z][A-Za-z0-9_%]{0,63}$`
 	TunableValuePattern = `^-?[0-9]{1,20}$`
 )
 

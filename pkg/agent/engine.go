@@ -94,12 +94,23 @@ type run struct {
 	itab aix.Inittab
 	boot string
 
+	// actions is st.OwedActions: subsystem actions owed by changes already
+	// made, persisted so a crash or failure never loses one.
 	actions map[string]rendered.SubsystemAction
 	started map[string]bool
+	// undefined holds subsystems this run removed (rmssys).
+	undefined map[string]bool
 	// desiredState is the state each managed subsystem should end in.
 	desiredState map[string]string
 	bosboot      bool
 	changed      []string
+}
+
+// ApplyOptions modify an apply.
+type ApplyOptions struct {
+	// Force (the force file) re-runs every item's subsystem actions and
+	// retries a bosboot that failed for this config.
+	Force bool
 }
 
 func (e *Engine) now() time.Time {
@@ -117,8 +128,11 @@ func (e *Engine) bootKey() string {
 }
 
 func (e *Engine) newRun(ctx context.Context, st *State) *run {
+	if st.OwedActions == nil {
+		st.OwedActions = map[string]rendered.SubsystemAction{}
+	}
 	r := &run{e: e, ctx: ctx, st: st, boot: e.bootKey(),
-		actions: map[string]rendered.SubsystemAction{}, started: map[string]bool{}, desiredState: map[string]string{}}
+		actions: st.OwedActions, started: map[string]bool{}, undefined: map[string]bool{}, desiredState: map[string]string{}}
 	if e.Runner != nil {
 		r.src = aix.NewSRC(e.Runner)
 		r.tun = &aix.Tunables{Runner: e.Runner}
@@ -163,10 +177,14 @@ func ordered(c *rendered.Config) []rendered.Item {
 
 func (r *run) save() error { return r.e.Files.SaveState(r.st) }
 
-// Apply converges the host to cfg. full re-runs every item's actions (the
-// force file, or a node whose files drifted); a config left pending by an
-// interrupted apply is always applied in full.
-func (e *Engine) Apply(ctx context.Context, name string, cfg *rendered.Config, full bool) (*Result, error) {
+// Apply converges the host to cfg.
+//
+// Every change is preceded by a save of the state it depends on: the
+// baseline, the subsystem actions it will owe, a pending-reboot entry. So an
+// apply interrupted at any point can simply be run again: each item is
+// re-checked against the live state, owed actions are still owed, and items
+// of an earlier, unfinished config are still known and restored.
+func (e *Engine) Apply(ctx context.Context, name string, cfg *rendered.Config, opts ApplyOptions) (*Result, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -174,7 +192,7 @@ func (e *Engine) Apply(ctx context.Context, name string, cfg *rendered.Config, f
 	if err != nil {
 		return nil, err
 	}
-	if st.BosbootFailedFor == name && !full {
+	if st.BosbootFailedFor == name && !opts.Force {
 		msg := "bosboot failed"
 		if st.Bosboot != nil && st.Bosboot.Error != "" {
 			msg += ": " + st.Bosboot.Error
@@ -182,10 +200,15 @@ func (e *Engine) Apply(ctx context.Context, name string, cfg *rendered.Config, f
 		return nil, fmt.Errorf("%s while applying %s; it is not retried automatically (fix the cause, then create %s or roll out a new config)", msg, name, ForceFile)
 	}
 	r := e.newRun(ctx, st)
-	all := full || st.Pending != nil
 	if st.Pending != nil {
-		klog.Info("the previous apply did not finish; re-applying in full")
+		klog.Info("the previous apply did not finish; resuming")
 	}
+	if opts.Force {
+		st.RestoreFailures = nil
+	}
+	// Items of earlier unfinished configs that this config drops stay
+	// known, so they are still restored.
+	st.Leftover = withoutKeys(mergeItems(st.Leftover, st.Pending), cfg.Items())
 	owned := st.Owned()
 	for _, s := range cfg.Subsystems {
 		if s.State != "" {
@@ -194,13 +217,22 @@ func (e *Engine) Apply(ctx context.Context, name string, cfg *rendered.Config, f
 	}
 
 	// Check every item before changing anything, so a required item that
-	// cannot converge blocks the whole config, not half of it.
+	// cannot converge blocks the whole config, not half of it. Record each
+	// item's original state the first time it is seen.
 	type step struct {
 		item   rendered.Item
 		status status
 	}
 	var steps []step
 	var reprov []nodestate.ItemIssue
+	skip := func(item rendered.Item, reason string) error {
+		if rendered.PolicyOf(item).Required {
+			return fmt.Errorf("%s cannot converge in place and is required: %s", item.Key(), reason)
+		}
+		klog.Warningf("%s cannot converge in place, skipping it: %s", item.Key(), reason)
+		reprov = append(reprov, nodestate.ItemIssue{Item: item.Key(), Reason: reason})
+		return nil
+	}
 	for _, item := range ordered(cfg) {
 		if _, isFile := item.(rendered.File); e.DryRun && !isFile {
 			klog.Infof("dry run: skipping %s", item.Key())
@@ -209,24 +241,26 @@ func (e *Engine) Apply(ctx context.Context, name string, cfg *rendered.Config, f
 		s, _, err := r.check(item)
 		var rp *reprovisionError
 		if errors.As(err, &rp) {
-			if rendered.PolicyOf(item).Required {
-				return nil, fmt.Errorf("%s cannot converge in place and is required: %s", item.Key(), rp.reason)
+			if err := skip(item, rp.reason); err != nil {
+				return nil, err
 			}
-			klog.Warningf("%s cannot converge in place, skipping it: %s", item.Key(), rp.reason)
-			reprov = append(reprov, nodestate.ItemIssue{Item: item.Key(), Reason: rp.reason})
 			continue
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", item.Key(), err)
 		}
-		if _, managed := owned[item.Key()]; !managed {
-			if _, ok := st.Baselines[item.Key()]; !ok {
-				b, err := r.baseline(item)
-				if err != nil {
-					return nil, fmt.Errorf("%s: recording its original state: %w", item.Key(), err)
-				}
-				st.Baselines[item.Key()] = b
+		if _, ok := st.Baselines[item.Key()]; !ok {
+			b, err := r.baseline(item)
+			if err != nil {
+				return nil, fmt.Errorf("%s: recording its original state: %w", item.Key(), err)
 			}
+			if err := validateBaseline(item, b); err != nil {
+				if err := skip(item, fmt.Sprintf("its current state could not be restored later, so AMCO does not manage it: %v", err)); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			st.Baselines[item.Key()] = b
 		}
 		steps = append(steps, step{item, s})
 	}
@@ -234,29 +268,32 @@ func (e *Engine) Apply(ctx context.Context, name string, cfg *rendered.Config, f
 	if err := r.save(); err != nil {
 		return nil, fmt.Errorf("recording apply in progress: %w", err)
 	}
+	fail := func(err error) (*Result, error) {
+		_ = r.save()
+		return nil, err
+	}
 
 	for _, s := range steps {
 		key := s.item.Key()
+		if opts.Force {
+			if err := r.queueActions(s.item); err != nil {
+				return fail(err)
+			}
+		}
 		switch s.status {
 		case needsChange:
 			if err := r.apply(s.item); err != nil {
-				_ = r.save()
-				return nil, fmt.Errorf("%s: %w", key, err)
+				return fail(fmt.Errorf("%s: %w", key, err))
 			}
 			r.changed = append(r.changed, key)
 		case inSync:
 			delete(st.PendingReboot, key)
-			if all {
-				r.queueActions(s.item)
-			}
-		case awaitingReboot:
-			if all {
-				r.queueActions(s.item)
-			}
 		}
 	}
 
-	// Items that left the config go back to their original state.
+	// Items that left the config go back to their original state. A
+	// restore that fails is reported and given up, never left to block
+	// every later config.
 	desired := cfg.Items()
 	var removed []string
 	for key := range owned {
@@ -267,10 +304,9 @@ func (e *Engine) Apply(ctx context.Context, name string, cfg *rendered.Config, f
 	sort.Strings(removed)
 	for _, key := range removed {
 		if err := r.restore(key, owned[key]); err != nil {
-			_ = r.save()
-			return nil, fmt.Errorf("restoring %s: %w", key, err)
+			klog.Warningf("could not restore %s to its original state: %v", key, err)
+			st.RestoreFailures = append(st.RestoreFailures, nodestate.ItemIssue{Item: key, Reason: "could not restore its original state: " + err.Error()})
 		}
-		delete(st.Baselines, key)
 		r.changed = append(r.changed, key)
 	}
 
@@ -278,8 +314,7 @@ func (e *Engine) Apply(ctx context.Context, name string, cfg *rendered.Config, f
 		return nil, err
 	}
 	if err := r.runActions(); err != nil {
-		_ = r.save()
-		return nil, err
+		return fail(err)
 	}
 
 	// Verify what changed actually converged.
@@ -289,22 +324,108 @@ func (e *Engine) Apply(ctx context.Context, name string, cfg *rendered.Config, f
 		}
 		got, detail, err := r.check(s.item)
 		if err != nil {
-			_ = r.save()
-			return nil, fmt.Errorf("verifying %s: %w", s.item.Key(), err)
+			return fail(fmt.Errorf("verifying %s: %w", s.item.Key(), err))
 		}
-		if got == needsChange {
-			_ = r.save()
-			return nil, fmt.Errorf("%s did not converge: %s", s.item.Key(), detail)
+		switch got {
+		case needsChange:
+			return fail(fmt.Errorf("%s did not converge: %s", s.item.Key(), detail))
+		case inSync:
+			delete(st.PendingReboot, s.item.Key())
 		}
 	}
 
-	st.Name, st.Config, st.Pending, st.Reprovision = name, cfg, nil, reprov
+	for _, key := range removed {
+		delete(st.Baselines, key)
+	}
+	st.Name, st.Config, st.Pending, st.Leftover, st.Reprovision = name, cfg, nil, nil, reprov
 	if err := r.save(); err != nil {
 		return nil, err
 	}
 	sort.Strings(r.changed)
 	klog.Infof("applied %s: %d item(s) changed, %d pending reboot, %d need reprovisioning", name, len(r.changed), len(st.PendingReboot), len(reprov))
 	return &Result{Changed: r.changed, PendingReboot: st.PendingRebootKeys(), Reprovision: reprov, Bosboot: st.Bosboot}, nil
+}
+
+// mergeItems returns the union of two configs' items; b wins for a key.
+func mergeItems(a, b *rendered.Config) *rendered.Config {
+	if a == nil && b == nil {
+		return nil
+	}
+	out := &rendered.Config{Version: rendered.FormatVersion}
+	items := a.Items()
+	for k, v := range b.Items() {
+		items[k] = v
+	}
+	for _, it := range items {
+		addItem(out, it)
+	}
+	return out
+}
+
+// withoutKeys returns c without the items whose keys are in drop.
+func withoutKeys(c *rendered.Config, drop map[string]rendered.Item) *rendered.Config {
+	if c == nil {
+		return nil
+	}
+	out := &rendered.Config{Version: rendered.FormatVersion, Pool: c.Pool}
+	for k, it := range c.Items() {
+		if _, ok := drop[k]; !ok {
+			addItem(out, it)
+		}
+	}
+	if len(out.Items()) == 0 {
+		return nil
+	}
+	out.Normalize()
+	return out
+}
+
+func addItem(c *rendered.Config, it rendered.Item) {
+	switch v := it.(type) {
+	case rendered.File:
+		c.Files = append(c.Files, v)
+	case rendered.Subsystem:
+		c.Subsystems = append(c.Subsystems, v)
+	case rendered.InittabEntry:
+		c.Inittab = append(c.Inittab, v)
+	case rendered.Tunable:
+		c.Tunables = append(c.Tunables, v)
+	case rendered.DeviceAttribute:
+		c.DeviceAttributes = append(c.DeviceAttributes, v)
+	}
+}
+
+// validateBaseline checks that an item's original state is something AMCO
+// could write back. If not, managing the item would make its removal fail
+// forever, so the item is not managed at all.
+func validateBaseline(item rendered.Item, b Baseline) error {
+	switch it := item.(type) {
+	case rendered.Subsystem:
+		if b.Subsystem != nil && b.Subsystem.Definition != nil {
+			d := *b.Subsystem.Definition
+			if d.Contact != aix.ContactSignal && d.Contact != aix.ContactSocket {
+				return fmt.Errorf("subsystem %s uses contact %q, which AMCO cannot recreate", it.Name, d.Contact)
+			}
+			return d.Validate()
+		}
+	case rendered.InittabEntry:
+		if b.Inittab != nil && b.Inittab.Entry != nil {
+			return aix.ValidateInittabEntry(*b.Inittab.Entry)
+		}
+	case rendered.Tunable:
+		if b.Tunable != nil {
+			if _, ok := decimal(b.Tunable.Boot); !ok {
+				if _, ok := decimal(b.Tunable.Current); !ok {
+					return fmt.Errorf("%s has no numeric value (%q)", it.Key(), b.Tunable.Current)
+				}
+			}
+		}
+	case rendered.DeviceAttribute:
+		if b.Device != nil {
+			return aix.ValidateDeviceAttribute(it.Device, it.Attribute, b.Device.Current)
+		}
+	}
+	return nil
 }
 
 // Drift compares the live state of every applied item with the applied
@@ -322,7 +443,7 @@ func (e *Engine) Drift(ctx context.Context) ([]nodestate.ItemIssue, error) {
 		skip[i.Item] = true
 	}
 	r := e.newRun(ctx, st)
-	var out []nodestate.ItemIssue
+	out := append([]nodestate.ItemIssue(nil), st.RestoreFailures...)
 	for _, item := range ordered(st.Config) {
 		if _, isFile := item.(rendered.File); skip[item.Key()] || (e.DryRun && !isFile) {
 			continue
@@ -353,13 +474,13 @@ func (e *Engine) ReconcileBoot() (cleared []string, err error) {
 	}
 	changed := false
 	for key, p := range st.PendingReboot {
-		if p.SetBoot != boot {
+		if !aix.SameBoot(p.SetBoot, boot) {
 			delete(st.PendingReboot, key)
 			cleared = append(cleared, key)
 			changed = true
 		}
 	}
-	if st.Bosboot != nil && st.Bosboot.State == nodestate.BosbootRebuilt && st.BosbootBoot != boot {
+	if st.Bosboot != nil && st.Bosboot.State == nodestate.BosbootRebuilt && !aix.SameBoot(st.BosbootBoot, boot) {
 		st.Bosboot, st.BosbootBoot = nil, ""
 		changed = true
 	}
@@ -424,7 +545,7 @@ func (r *run) apply(item rendered.Item) error {
 func (r *run) restore(key string, item rendered.Item) error {
 	b, ok := r.st.Baselines[key]
 	if f, isFile := item.(rendered.File); isFile {
-		return r.restoreFile(f, b.File, ok)
+		return r.restoreFile(f, b.File, ok && b.File != nil)
 	}
 	if !ok {
 		klog.Infof("%s left the config; it was never changed, so there is nothing to restore", key)
@@ -455,19 +576,28 @@ func (r *run) restore(key string, item rendered.Item) error {
 
 var errNoRunner = errors.New("this item needs AIX commands, which are not available (not running on AIX)")
 
-// queueActions schedules an item's subsystem actions. Restart wins over
+// queueActions records, and saves, an item's subsystem actions; callers
+// queue them before making the change that owes them. Restart wins over
 // refresh for the same subsystem.
-func (r *run) queueActions(item rendered.Item) {
+func (r *run) queueActions(item rendered.Item) error {
 	f, ok := item.(rendered.File)
-	if !ok {
-		return
+	if !ok || len(f.Actions) == 0 {
+		return nil
 	}
 	for _, a := range f.Actions {
-		if prev, ok := r.actions[a.Subsystem]; ok && prev.Action == rendered.ActionRestart {
-			continue
-		}
-		r.actions[a.Subsystem] = a
+		r.owe(a)
 	}
+	return r.save()
+}
+
+func (r *run) owe(a rendered.SubsystemAction) {
+	if r.undefined[a.Subsystem] {
+		return
+	}
+	if prev, ok := r.actions[a.Subsystem]; ok && prev.Action == rendered.ActionRestart {
+		return
+	}
+	r.actions[a.Subsystem] = a
 }
 
 // runActions restarts or refreshes the subsystems whose files changed:
@@ -475,6 +605,13 @@ func (r *run) queueActions(item rendered.Item) {
 // not running, that a config wants inoperative, or that were just started
 // are left alone.
 func (r *run) runActions() error {
+	// A restart that stopped a subsystem and then failed is finished on
+	// every run, whatever else is queued.
+	for _, n := range r.st.Restarting {
+		if _, ok := r.actions[n]; !ok {
+			r.actions[n] = rendered.SubsystemAction{Subsystem: n, Action: rendered.ActionRestart, IgnoreMissing: true}
+		}
+	}
 	if len(r.actions) == 0 {
 		return nil
 	}
@@ -497,21 +634,33 @@ func (r *run) runActions() error {
 		}
 		return names[i] < names[j]
 	})
+	done := func(n string) error {
+		delete(r.actions, n)
+		r.st.Restarting = remove(r.st.Restarting, n)
+		return r.save()
+	}
 	for _, n := range names {
 		a := r.actions[n]
 		switch {
 		case r.e.NoRestart || r.src == nil:
 			klog.Infof("not running %s of %s (restarts disabled)", a.Action, n)
+			if err := done(n); err != nil {
+				return err
+			}
 			continue
-		case r.started[n]:
-			continue
-		case r.desiredState[n] == rendered.SubsystemInoperative:
+		case r.started[n], r.undefined[n], r.desiredState[n] == rendered.SubsystemInoperative:
+			if err := done(n); err != nil {
+				return err
+			}
 			continue
 		}
 		st, err := r.src.Status(r.ctx, n)
 		if errors.Is(err, aix.ErrSubsystemNotFound) {
 			if a.IgnoreMissing {
 				klog.Warningf("%s is not defined on this host; skipping its %s", n, a.Action)
+				if err := done(n); err != nil {
+					return err
+				}
 				continue
 			}
 			return fmt.Errorf("%s of %s: %w", a.Action, n, err)
@@ -522,6 +671,9 @@ func (r *run) runActions() error {
 		resuming := contains(r.st.Restarting, n)
 		if st.State != aix.StateActive && !resuming {
 			klog.Infof("%s is %s; not running its %s", n, st.State, a.Action)
+			if err := done(n); err != nil {
+				return err
+			}
 			continue
 		}
 		klog.Infof("running %s of %s", a.Action, n)
@@ -533,14 +685,14 @@ func (r *run) runActions() error {
 				}
 			}
 			err = r.src.Restart(r.ctx, n)
-			if err == nil {
-				r.st.Restarting = remove(r.st.Restarting, n)
-			}
 		} else {
 			err = r.src.Reload(r.ctx, n)
 		}
 		if err != nil {
 			return fmt.Errorf("%s of %s: %w", a.Action, n, err)
+		}
+		if err := done(n); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -565,15 +717,18 @@ func remove(list []string, s string) []string {
 	return out
 }
 
-// markPending records that key waits for the next boot with value.
-func (r *run) markPending(key, value string) {
+// markPending records, and saves, that key waits for the next boot with
+// value. It is called before the command that makes the change, so a crash
+// in between never hides a change that is not yet effective.
+func (r *run) markPending(key, value string) error {
 	r.st.PendingReboot[key] = PendingItem{Value: value, SetBoot: r.boot}
+	return r.save()
 }
 
 // pendingThisBoot reports whether key was set persistently during this boot.
 func (r *run) pendingThisBoot(key, value string) bool {
 	p, ok := r.st.PendingReboot[key]
-	return ok && p.SetBoot == r.boot && p.Value == value
+	return ok && aix.SameBoot(p.SetBoot, r.boot) && p.Value == value
 }
 
 // runBosboot rebuilds the boot image when a Bosboot tunable changed. A

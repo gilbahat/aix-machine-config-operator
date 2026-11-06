@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"regexp"
 	"strings"
 )
@@ -102,7 +103,11 @@ func (d Devices) Get(ctx context.Context, device, attribute string) (DeviceAttri
 	out, err := d.Runner.Run(ctx, CmdLsattr, "-El", device, "-a", attribute, "-F", "value:user_settable")
 	if err != nil {
 		// lsattr exits 255 when the attribute does not exist.
-		return DeviceAttribute{}, fmt.Errorf("%s %s: %w (%v)", device, attribute, ErrAttributeNotFound, err)
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 255 {
+			return DeviceAttribute{}, fmt.Errorf("%s %s: %w", device, attribute, ErrAttributeNotFound)
+		}
+		return DeviceAttribute{}, fmt.Errorf("reading %s %s: %w", device, attribute, err)
 	}
 	return ParseLsattrValue(out)
 }

@@ -23,6 +23,15 @@ type State struct {
 	// is re-applied in full: every item is re-checked and every action of
 	// every item is run again.
 	Pending *rendered.Config `json:"pending,omitempty"`
+	// Leftover holds items of earlier unfinished configs that later
+	// configs dropped, so they are still restored.
+	Leftover *rendered.Config `json:"leftover,omitempty"`
+	// OwedActions are subsystem actions owed by changes already made,
+	// saved before the change so they survive a failure or crash.
+	OwedActions map[string]rendered.SubsystemAction `json:"owedActions,omitempty"`
+	// RestoreFailures are items AMCO stopped managing but could not put
+	// back; they are reported as drift until the force file clears them.
+	RestoreFailures []nodestate.ItemIssue `json:"restoreFailures,omitempty"`
 
 	// Baselines hold each managed item's state from before AMCO first
 	// managed it. When the item leaves the config it is restored to this.
@@ -107,6 +116,9 @@ func (s *State) Owned() map[string]rendered.Item {
 	for k, v := range s.Config.Items() {
 		out[k] = v
 	}
+	for k, v := range s.Leftover.Items() {
+		out[k] = v
+	}
 	for k, v := range s.Pending.Items() {
 		out[k] = v
 	}
@@ -147,7 +159,7 @@ func (h Host) LoadState() (*State, error) {
 	if err := json.Unmarshal(data, s); err != nil {
 		return nil, fmt.Errorf("decoding %s: %w", StateFile, err)
 	}
-	for _, c := range []*rendered.Config{s.Config, s.Pending} {
+	for _, c := range []*rendered.Config{s.Config, s.Pending, s.Leftover} {
 		if c == nil {
 			continue
 		}
@@ -187,7 +199,7 @@ func (h Host) loadV1State(data []byte) (*State, error) {
 		out := &rendered.Config{Version: rendered.FormatVersion, Pool: c.Pool}
 		for _, f := range c.Files {
 			out.Files = append(out.Files, rendered.File{Path: f.Path, Mode: f.Mode, Contents: f.Contents, Origin: rendered.OriginAMCO})
-			_, err := os.Stat(h.path(f.Path + BackupSuffix))
+			_, err := os.Stat(h.path(legacyBackupPath(f.Path)))
 			s.Baselines[rendered.FileKey(f.Path)] = Baseline{File: &FileBaseline{Exists: err == nil, Mode: 0o644}}
 		}
 		return out
