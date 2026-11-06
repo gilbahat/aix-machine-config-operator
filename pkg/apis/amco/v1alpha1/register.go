@@ -23,7 +23,7 @@ var (
 )
 
 func addKnownTypes(scheme *runtime.Scheme) error {
-	scheme.AddKnownTypes(SchemeGroupVersion, &AIXConfigPool{}, &AIXConfigPoolList{})
+	scheme.AddKnownTypes(SchemeGroupVersion, &AIXConfigPool{}, &AIXConfigPoolList{}, &AIXMachineConfig{}, &AIXMachineConfigList{})
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
 	return nil
 }

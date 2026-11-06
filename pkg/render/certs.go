@@ -37,20 +37,48 @@ const (
 // under. It keeps bundle names from escaping CertsDir.
 var registryHostRE = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?$`)
 
+// What a change to one of AMCO's own files needs on the node.
+type fileEffect int
+
+const (
+	// live: containerd reads certs.d on every pull; the kubelet reloads
+	// its client CA file.
+	live fileEffect = iota
+	// restartContainerd: Go reads the system roots once, and containerd
+	// reads its configuration at start. Running containers survive a
+	// containerd restart (shim v2), so there is no drain.
+	restartContainerd
+	// restartKubelet: the kubelet reads its configuration at start. This
+	// keeps the MCO's behaviour for kubelet configuration: drain first.
+	restartKubelet
+)
+
+func amcoFile(p, contents string, effect fileEffect) rendered.File {
+	f := rendered.File{Path: p, Mode: 0o644, Contents: contents, Origin: rendered.OriginAMCO}
+	switch effect {
+	case restartContainerd:
+		f.Actions = []rendered.SubsystemAction{{Subsystem: rendered.SubsystemContainerd, Action: rendered.ActionRestart, IgnoreMissing: true}}
+	case restartKubelet:
+		f.Actions = []rendered.SubsystemAction{{Subsystem: rendered.SubsystemKubelet, Action: rendered.ActionRestart, IgnoreMissing: true}}
+		f.Drain = true
+	}
+	return f
+}
+
 func renderCertificates(cc *mcfgv1.ControllerConfig) ([]rendered.File, error) {
 	var files []rendered.File
 	if len(cc.Spec.KubeAPIServerServingCAData) > 0 {
-		files = append(files, rendered.File{Path: KubeletCAPath, Mode: 0o644, Contents: string(cc.Spec.KubeAPIServerServingCAData), Group: rendered.GroupKubeletCA})
+		files = append(files, amcoFile(KubeletCAPath, string(cc.Spec.KubeAPIServerServingCAData), live))
 	}
 	if len(cc.Spec.AdditionalTrustBundle) > 0 {
-		files = append(files, rendered.File{Path: TrustBundlePath, Mode: 0o644, Contents: string(cc.Spec.AdditionalTrustBundle), Group: rendered.GroupTrust})
+		files = append(files, amcoFile(TrustBundlePath, string(cc.Spec.AdditionalTrustBundle), restartContainerd))
 	}
 	cas, err := registryCAs(cc)
 	if err != nil {
 		return nil, err
 	}
 	for host, data := range cas {
-		files = append(files, rendered.File{Path: registryCAPath(host), Mode: 0o644, Contents: data, Group: rendered.GroupRegistries})
+		files = append(files, amcoFile(registryCAPath(host), data, live))
 	}
 	return files, nil
 }

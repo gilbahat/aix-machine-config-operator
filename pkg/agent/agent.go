@@ -3,9 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -23,21 +21,10 @@ import (
 	"github.com/gilbahat/aix-machine-config-operator/pkg/rendered"
 )
 
-// Restarter restarts node services; on AIX it is the SRC.
-type Restarter interface {
-	Restart(ctx context.Context, subsystem string) error
-}
-
-// ErrServiceNotDefined is returned (wrapped) by a Restarter when the service
-// is not registered on the host. The agent tolerates it, so a node can be
-// tested before the kubelet port is installed.
-var ErrServiceNotDefined = errors.New("service is not defined on this host")
-
 // Agent reconciles one node.
 type Agent struct {
-	Host      Host
-	Kube      kubernetes.Interface
-	Restarter Restarter
+	Engine *Engine
+	Kube   kubernetes.Interface
 	// NodeName is the node this agent manages.
 	NodeName string
 	// Namespace holds the rendered ConfigMaps.
@@ -49,20 +36,33 @@ type Agent struct {
 
 	queue workqueue.TypedRateLimitingInterface[string]
 	nodes cache.Indexer
-	// drift is set while the node is degraded because a managed file changed
-	// behind the agent's back; only a new config or the force file clears it.
+	// drift is set while the node is degraded because a managed item
+	// changed behind the agent's back; only a new config, restoring the
+	// item or the force file clears it.
 	drift bool
 }
+
+// Host returns the agent's file host.
+func (a *Agent) Host() Host { return a.Engine.Files }
 
 // Run watches the node and reconciles until ctx is done.
 func (a *Agent) Run(ctx context.Context) error {
 	a.queue = workqueue.NewTypedRateLimitingQueueWithConfig(workqueue.DefaultTypedControllerRateLimiter[string](), workqueue.TypedRateLimitingQueueConfig[string]{Name: "node"})
 	defer a.queue.ShutDown()
 
-	if len(a.Info) > 0 {
+	if _, err := a.Engine.ReconcileBoot(); err != nil {
+		klog.Errorf("checking pending-reboot items against the boot time: %v", err)
+	}
+	{
 		ann := map[string]interface{}{}
 		for k, v := range a.Info {
 			ann[k] = v
+		}
+		if b := a.Engine.bootKey(); b != "" {
+			ann[nodestate.BootTimeAnnotation] = b
+		}
+		if err := a.addReport(ann); err != nil {
+			klog.Errorf("reading agent state: %v", err)
 		}
 		// At boot the agent may start before the API server is reachable or
 		// before the kubelet has registered the node; keep trying.
@@ -155,22 +155,24 @@ func (a *Agent) Reconcile(ctx context.Context, node *corev1.Node) error {
 	if desired == "" {
 		return nil
 	}
-	applied, err := a.Host.LoadApplied()
+	st, err := a.Host().LoadState()
 	if err != nil {
 		return a.degrade(ctx, fmt.Errorf("reading applied state: %w", err))
 	}
-	force := a.Host.ForceRequested()
-	upToDate := applied != nil && applied.Pending == nil && applied.Config != nil && applied.Name == desired && nodestate.Current(node) == desired
+	force := a.Host().ForceRequested()
+	upToDate := st.Pending == nil && st.Config != nil && st.Name == desired && nodestate.Current(node) == desired
 	if !force && upToDate {
 		// The applied state is only recorded after a successful apply, so
-		// the only thing left to check is whether the files drifted.
-		return a.checkDrift(ctx, node, applied)
+		// the only thing left to check is whether items drifted.
+		return a.checkDrift(ctx, node)
 	}
-	// A new config rewrites everything when the node has drifted, so the
+	// A new config re-runs every action when the node has drifted, so the
 	// update also repairs the drift instead of reporting Done over it.
 	full := force || a.drift
-	if !full && applied != nil && applied.Config != nil && len(a.Host.Drift(applied.Config)) > 0 {
-		full = true
+	if !full && st.Config != nil {
+		if issues, err := a.Engine.Drift(ctx); err == nil && len(issues) > 0 {
+			full = true
+		}
 	}
 	if force {
 		klog.Infof("%s present: re-applying %s in full", ForceFile, desired)
@@ -179,7 +181,7 @@ func (a *Agent) Reconcile(ctx context.Context, node *corev1.Node) error {
 		return a.degrade(ctx, err)
 	}
 	if force {
-		if err := a.Host.ClearForce(); err != nil {
+		if err := a.Host().ClearForce(); err != nil {
 			klog.Warningf("removing %s: %v", ForceFile, err)
 		}
 	}
@@ -200,15 +202,57 @@ func (a *Agent) apply(ctx context.Context, node *corev1.Node, desired string, fu
 	if err != nil {
 		return err
 	}
-	if err := ApplyConfig(ctx, a.Host, a.Restarter, desired, to, full); err != nil {
+	if _, err := a.Engine.Apply(ctx, desired, to, full); err != nil {
+		_ = a.reportOnly(ctx)
 		return err
 	}
 	a.drift = false
-	return a.annotate(ctx, map[string]interface{}{
+	ann := map[string]interface{}{
 		nodestate.CurrentConfigAnnotation: desired,
 		nodestate.StateAnnotation:         nodestate.StateDone,
 		nodestate.ReasonAnnotation:        nil,
-	})
+		nodestate.DriftAnnotation:         nil,
+	}
+	if err := a.addReport(ann); err != nil {
+		return err
+	}
+	return a.annotate(ctx, ann)
+}
+
+// addReport adds the pending-reboot, reprovision and bosboot annotations
+// from the agent's state to ann (nil values remove empty reports).
+func (a *Agent) addReport(ann map[string]interface{}) error {
+	st, err := a.Host().LoadState()
+	if err != nil {
+		return err
+	}
+	setJSON(ann, nodestate.PendingRebootAnnotation, st.PendingRebootKeys())
+	setJSON(ann, nodestate.ReprovisionAnnotation, st.Reprovision)
+	if st.Bosboot != nil {
+		setJSON(ann, nodestate.BosbootAnnotation, st.Bosboot)
+	} else {
+		ann[nodestate.BosbootAnnotation] = nil
+	}
+	return nil
+}
+
+// reportOnly refreshes the report annotations, e.g. after a failed apply.
+func (a *Agent) reportOnly(ctx context.Context) error {
+	ann := map[string]interface{}{}
+	if err := a.addReport(ann); err != nil {
+		return err
+	}
+	return a.annotate(ctx, ann)
+}
+
+// setJSON sets key to the JSON of v, or removes it when v is an empty list.
+func setJSON[T any](ann map[string]interface{}, key string, v T) {
+	data, err := json.Marshal(v)
+	if err != nil || string(data) == "null" || string(data) == "[]" {
+		ann[key] = nil
+		return
+	}
+	ann[key] = string(data)
 }
 
 // verifyRendered checks that a ConfigMap is a genuine rendered config: the
@@ -232,103 +276,59 @@ func verifyRendered(cm *corev1.ConfigMap, name string) (*rendered.Config, error)
 	return cfg, nil
 }
 
-// ApplyConfig moves the host to cfg and restarts the affected services. It
-// is shared by the cluster loop and the standalone `amco-agent apply`
-// command. A nil restarter skips restarts.
-//
-// The change is computed from the last fully applied config, unless full is
-// set or a previous apply did not finish, in which case every file is
-// rewritten and every service whose files are involved is restarted. Files
-// the agent wrote before and that cfg no longer lists are removed.
-func ApplyConfig(ctx context.Context, host Host, restarter Restarter, name string, cfg *rendered.Config, full bool) error {
-	state, err := host.LoadApplied()
+// checkDrift compares every applied item's live state with the applied
+// config and reports the result. It never changes the host.
+func (a *Agent) checkDrift(ctx context.Context, node *corev1.Node) error {
+	issues, err := a.Engine.Drift(ctx)
 	if err != nil {
+		return a.degrade(ctx, fmt.Errorf("checking for drift: %w", err))
+	}
+	ann := map[string]interface{}{}
+	if err := a.addReport(ann); err != nil {
 		return err
 	}
-	owned := state.Owned()
-	var from *rendered.Config
-	if state != nil && state.Pending == nil && !full {
-		from = state.Config
-	}
-	if state != nil && state.Pending != nil {
-		klog.Info("the previous apply did not finish; re-applying in full")
-	}
-	plan := rendered.Diff(from, cfg)
-
-	// Removals and their policies come from everything the agent may have
-	// written, including a half-applied config.
-	keep := map[string]bool{}
-	for _, f := range cfg.Files {
-		keep[f.Path] = true
-	}
-	groups := map[rendered.Group]bool{}
-	for _, f := range plan.Write {
-		groups[f.Group] = true
-	}
-	plan.Remove = nil
-	for p, f := range owned {
-		if !keep[p] {
-			plan.Remove = append(plan.Remove, p)
-			groups[f.Group] = true
-		}
-	}
-	sort.Strings(plan.Remove)
-	plan.Drain, plan.Restart = rendered.PolicyFor(groups)
-
-	klog.Infof("applying %s: %s", name, plan)
-	pending := &Applied{Pending: cfg}
-	if state != nil {
-		pending.Name, pending.Config = state.Name, state.Config
-	}
-	if err := host.SaveApplied(pending); err != nil {
-		return fmt.Errorf("recording apply in progress: %w", err)
-	}
-	if err := host.Apply(plan, owned); err != nil {
-		return fmt.Errorf("writing files: %w", err)
-	}
-	if err := restart(ctx, restarter, plan.Restart); err != nil {
-		return err
-	}
-	return host.SaveApplied(&Applied{Name: name, Config: cfg})
-}
-
-func restart(ctx context.Context, restarter Restarter, subsystems []string) error {
-	if restarter == nil {
-		if len(subsystems) > 0 {
-			klog.Infof("not restarting %s (restarts disabled)", strings.Join(subsystems, ", "))
-		}
-		return nil
-	}
-	for _, s := range subsystems {
-		klog.Infof("restarting %s", s)
-		if err := restarter.Restart(ctx, s); err != nil {
-			if errors.Is(err, ErrServiceNotDefined) {
-				klog.Warningf("%s is not defined on this host; skipping its restart", s)
-				continue
-			}
-			return fmt.Errorf("restarting %s: %w", s, err)
-		}
-	}
-	return nil
-}
-
-func (a *Agent) checkDrift(ctx context.Context, node *corev1.Node, applied *Applied) error {
-	drift := a.Host.Drift(applied.Config)
-	if len(drift) > 0 {
+	setJSON(ann, nodestate.DriftAnnotation, issues)
+	if len(issues) > 0 {
 		a.drift = true
-		msg := fmt.Sprintf("configuration drift: %s (restore the files or create %s to re-apply)", strings.Join(drift, "; "), ForceFile)
-		if nodestate.State(node) != nodestate.StateDegraded || node.Annotations[nodestate.ReasonAnnotation] != truncate(msg) {
+		var parts []string
+		for _, i := range issues {
+			parts = append(parts, i.Item+": "+i.Reason)
+		}
+		msg := truncate(fmt.Sprintf("configuration drift: %s (restore the items or create %s to re-apply)", strings.Join(parts, "; "), ForceFile))
+		ann[nodestate.StateAnnotation], ann[nodestate.ReasonAnnotation] = nodestate.StateDegraded, msg
+		if !annotationsMatch(node, ann) {
 			klog.Warning(msg)
-			return a.annotate(ctx, map[string]interface{}{nodestate.StateAnnotation: nodestate.StateDegraded, nodestate.ReasonAnnotation: truncate(msg)})
+			return a.annotate(ctx, ann)
 		}
 		return nil
 	}
 	if a.drift || nodestate.State(node) != nodestate.StateDone {
 		a.drift = false
-		klog.Info("managed files match the applied config again")
-		return a.annotate(ctx, map[string]interface{}{nodestate.StateAnnotation: nodestate.StateDone, nodestate.ReasonAnnotation: nil})
+		klog.Info("managed items match the applied config again")
 	}
-	return nil
+	ann[nodestate.StateAnnotation], ann[nodestate.ReasonAnnotation] = nodestate.StateDone, nil
+	if annotationsMatch(node, ann) {
+		return nil
+	}
+	return a.annotate(ctx, ann)
+}
+
+// annotationsMatch reports whether node already carries ann (nil = absent),
+// so a periodic check does not patch the node when nothing changed.
+func annotationsMatch(node *corev1.Node, ann map[string]interface{}) bool {
+	for k, v := range ann {
+		got, ok := node.Annotations[k]
+		if v == nil {
+			if ok {
+				return false
+			}
+			continue
+		}
+		if !ok || got != v.(string) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *Agent) degrade(ctx context.Context, cause error) error {

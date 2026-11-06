@@ -131,7 +131,7 @@ func renderKubelet(cc *mcfgv1.ControllerConfig, apiServer *configv1.APIServer, k
 	if err != nil {
 		return rendered.File{}, nil, err
 	}
-	return rendered.File{Path: KubeletConfigPath, Mode: 0o644, Contents: data, Group: rendered.GroupKubelet}, warnings, nil
+	return amcoFile(KubeletConfigPath, data, restartKubelet), warnings, nil
 }
 
 // encodeKubeletConfig serializes cfg as YAML. enforceNodeAllocatable is

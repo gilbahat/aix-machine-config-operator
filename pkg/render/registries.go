@@ -115,12 +115,7 @@ func renderRegistries(cc *mcfgv1.ControllerConfig, img *configv1.Image, idms []*
 
 	var files []rendered.File
 	for _, h := range hosts {
-		files = append(files, rendered.File{
-			Path:     path.Join(CertsDir, h.host, "hosts.toml"),
-			Mode:     0o644,
-			Contents: h.toml(),
-			Group:    rendered.GroupRegistries,
-		})
+		files = append(files, amcoFile(path.Join(CertsDir, h.host, "hosts.toml"), h.toml(), live))
 	}
 	return files, warnings, nil
 }

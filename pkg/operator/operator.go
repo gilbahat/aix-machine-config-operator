@@ -76,16 +76,18 @@ type Operator struct {
 	kube  kubernetes.Interface
 	pools client.PoolInterface
 
-	nodeLister      corelisters.NodeLister
-	cmLister        corelisters.ConfigMapNamespaceLister
-	poolIndexer     cache.Indexer
-	ccLister        mcfglisters.ControllerConfigLister
-	kcLister        mcfglisters.KubeletConfigLister
-	crcLister       mcfglisters.ContainerRuntimeConfigLister
-	imageLister     cfglisters.ImageLister
-	apiServerLister cfglisters.APIServerLister
-	idmsLister      cfglisters.ImageDigestMirrorSetLister
-	itmsLister      cfglisters.ImageTagMirrorSetLister
+	nodeLister  corelisters.NodeLister
+	cmLister    corelisters.ConfigMapNamespaceLister
+	poolIndexer cache.Indexer
+	// machineConfigIndexer holds AIXMachineConfigs.
+	machineConfigIndexer cache.Indexer
+	ccLister             mcfglisters.ControllerConfigLister
+	kcLister             mcfglisters.KubeletConfigLister
+	crcLister            mcfglisters.ContainerRuntimeConfigLister
+	imageLister          cfglisters.ImageLister
+	apiServerLister      cfglisters.APIServerLister
+	idmsLister           cfglisters.ImageDigestMirrorSetLister
+	itmsLister           cfglisters.ImageTagMirrorSetLister
 
 	synced []cache.InformerSynced
 	starts []func(<-chan struct{})
@@ -110,12 +112,13 @@ type drainFailure struct {
 }
 
 // New wires the operator to the cluster's informers.
-func New(cfg Config, kube kubernetes.Interface, configClient configclient.Interface, mcfgClient mcfgclient.Interface, pools client.PoolInterface) *Operator {
+func New(cfg Config, kube kubernetes.Interface, configClient configclient.Interface, mcfgClient mcfgclient.Interface, pools client.PoolInterface, machineConfigs client.MachineConfigInterface) *Operator {
 	kubeInf := kubeinformers.NewSharedInformerFactory(kube, cfg.Resync)
 	nsInf := kubeinformers.NewSharedInformerFactoryWithOptions(kube, cfg.Resync, kubeinformers.WithNamespace(cfg.Namespace))
 	cfgInf := configinformers.NewSharedInformerFactory(configClient, cfg.Resync)
 	mcfgInf := mcfginformers.NewSharedInformerFactory(mcfgClient, cfg.Resync)
 	poolInf := client.NewPoolInformer(pools, cfg.Resync)
+	mcInf := client.NewMachineConfigInformer(machineConfigs, cfg.Resync)
 
 	o := newOperator(cfg, kube, pools)
 	o.drainer = NewKubectlDrainer(kube, cfg.DrainTimeout)
@@ -133,6 +136,7 @@ func New(cfg Config, kube kubernetes.Interface, configClient configclient.Interf
 	o.nodeLister = nodes.Lister()
 	o.cmLister = cms.Lister().ConfigMaps(cfg.Namespace)
 	o.poolIndexer = poolInf.GetIndexer()
+	o.machineConfigIndexer = mcInf.GetIndexer()
 	o.ccLister = ccs.Lister()
 	o.kcLister = kcs.Lister()
 	o.crcLister = crcs.Lister()
@@ -156,7 +160,7 @@ func New(cfg Config, kube kubernetes.Interface, configClient configclient.Interf
 	}
 	for _, inf := range []cache.SharedIndexInformer{
 		cms.Informer(), ccs.Informer(), kcs.Informer(), crcs.Informer(),
-		images.Informer(), apiServers.Informer(), idms.Informer(), itms.Informer(), poolInf,
+		images.Informer(), apiServers.Informer(), idms.Informer(), itms.Informer(), poolInf, mcInf,
 	} {
 		if _, err := inf.AddEventHandler(allPools); err != nil {
 			utilruntime.HandleError(err)
@@ -173,7 +177,7 @@ func New(cfg Config, kube kubernetes.Interface, configClient configclient.Interf
 	}
 	o.synced = append(o.synced, nodes.Informer().HasSynced)
 
-	o.starts = []func(<-chan struct{}){kubeInf.Start, nsInf.Start, cfgInf.Start, mcfgInf.Start, func(stop <-chan struct{}) { go poolInf.Run(stop) }}
+	o.starts = []func(<-chan struct{}){kubeInf.Start, nsInf.Start, cfgInf.Start, mcfgInf.Start, func(stop <-chan struct{}) { go poolInf.Run(stop); go mcInf.Run(stop) }}
 	return o
 }
 

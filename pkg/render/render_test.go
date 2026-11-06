@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	amcov1alpha1 "github.com/gilbahat/aix-machine-config-operator/pkg/apis/amco/v1alpha1"
@@ -53,9 +54,10 @@ func TestRenderCertificates(t *testing.T) {
 	require.NoError(t, err)
 	fs := files(t, res)
 	assert.Equal(t, "KUBELET-CA\n", fs[KubeletCAPath].Contents)
-	assert.Equal(t, rendered.GroupKubeletCA, fs[KubeletCAPath].Group)
+	assert.Empty(t, fs[KubeletCAPath].Actions, "the kubelet reloads its client CA")
 	assert.Equal(t, "TRUST\n", fs[TrustBundlePath].Contents)
-	assert.Equal(t, rendered.GroupTrust, fs[TrustBundlePath].Group)
+	assert.Equal(t, []rendered.SubsystemAction{{Subsystem: "containerd", Action: "restart", IgnoreMissing: true}}, fs[TrustBundlePath].Actions)
+	assert.False(t, fs[TrustBundlePath].Drain, "a containerd restart does not drain")
 	assert.Equal(t, "REGCA\n", fs["/etc/containerd/certs.d/image-registry.openshift-image-registry.svc:5000/ca.crt"].Contents)
 	hosts := fs["/etc/containerd/certs.d/image-registry.openshift-image-registry.svc:5000/hosts.toml"].Contents
 	assert.Contains(t, hosts, `server = "https://image-registry.openshift-image-registry.svc:5000"`)
@@ -152,7 +154,8 @@ func TestRenderKubelet(t *testing.T) {
 	res, err := Render(Inputs{Pool: testPool(), ControllerConfig: testCC(), KubeletConfigs: []*mcfgv1.KubeletConfig{newer, other, older, unselected}})
 	require.NoError(t, err)
 	kubelet := files(t, res)[KubeletConfigPath]
-	assert.Equal(t, rendered.GroupKubelet, kubelet.Group)
+	assert.True(t, kubelet.Drain, "kubelet configuration changes drain, as in the MCO")
+	assert.Equal(t, "kubelet", kubelet.Actions[0].Subsystem)
 	c := kubelet.Contents
 	assert.Contains(t, c, "maxPods: 120")
 	assert.Contains(t, c, "kubeAPIBurst: 200")
@@ -215,4 +218,76 @@ func TestRenderIsDeterministic(t *testing.T) {
 func TestRenderNeedsControllerConfig(t *testing.T) {
 	_, err := Render(Inputs{Pool: testPool()})
 	assert.ErrorContains(t, err, "ControllerConfig")
+}
+
+func strPtr(s string) *string { return &s }
+
+func machineConfig(name string, spec amcov1alpha1.AIXMachineConfigSpec) *amcov1alpha1.AIXMachineConfig {
+	return &amcov1alpha1.AIXMachineConfig{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{amcov1alpha1.RoleLabel: "aix"}}, Spec: spec}
+}
+
+func selectingPool() *amcov1alpha1.AIXConfigPool {
+	p := testPool()
+	p.Spec.ConfigSelector = &metav1.LabelSelector{MatchLabels: map[string]string{amcov1alpha1.RoleLabel: "aix"}}
+	return p
+}
+
+func TestRenderMachineConfigsMergeInNameOrder(t *testing.T) {
+	base := machineConfig("00-base", amcov1alpha1.AIXMachineConfigSpec{
+		Files: []amcov1alpha1.FileSpec{{
+			Path: "/etc/ssh/sshd_config", Contents: amcov1alpha1.FileContents{Inline: strPtr("PermitRootLogin yes\n")},
+			OnChange: []amcov1alpha1.SubsystemActionSpec{{Subsystem: "sshd", Action: "Refresh"}},
+		}},
+		Tunables: []amcov1alpha1.TunableSpec{{Command: "no", Name: "tcp_sendspace", Value: intstr.FromInt32(262144)}},
+	})
+	site := machineConfig("50-site", amcov1alpha1.AIXMachineConfigSpec{
+		Files: []amcov1alpha1.FileSpec{{
+			Path: "/etc/ssh/sshd_config", Contents: amcov1alpha1.FileContents{Inline: strPtr("PermitRootLogin no\n")}, Mode: ptr.To[int32](0o600),
+		}},
+		Subsystems:       []amcov1alpha1.SubsystemSpec{{Name: "sshd", State: "Active"}},
+		Inittab:          []amcov1alpha1.InittabSpec{{Identifier: "appd", RunLevel: "2", Action: "once", Command: "/usr/bin/startsrc -s appd"}},
+		DeviceAttributes: []amcov1alpha1.DeviceAttributeSpec{{Device: "fcs0", Attribute: "num_cmd_elems", Value: intstr.FromString("2048")}},
+	})
+	other := &amcov1alpha1.AIXMachineConfig{ObjectMeta: metav1.ObjectMeta{Name: "99-other-role"}, Spec: amcov1alpha1.AIXMachineConfigSpec{
+		Tunables: []amcov1alpha1.TunableSpec{{Command: "vmo", Name: "minfree", Value: intstr.FromInt32(1)}},
+	}}
+
+	res, err := Render(Inputs{Pool: selectingPool(), ControllerConfig: testCC(), MachineConfigs: []*amcov1alpha1.AIXMachineConfig{site, other, base}})
+	require.NoError(t, err)
+	fs := files(t, res)
+	sshd := fs["/etc/ssh/sshd_config"]
+	assert.Equal(t, "PermitRootLogin no\n", sshd.Contents, "50-site wins over 00-base")
+	assert.Equal(t, uint32(0o600), sshd.Mode)
+	assert.Empty(t, sshd.Actions, "the whole item is replaced")
+	assert.Equal(t, rendered.OriginUser, sshd.Origin)
+	assert.Contains(t, res.Warnings, "AIXMachineConfig 50-site overrides file:/etc/ssh/sshd_config from 00-base")
+	assert.Equal(t, []rendered.Tunable{{Command: "no", Name: "tcp_sendspace", Value: "262144"}}, res.Config.Tunables, "unselected configs are ignored")
+	assert.Equal(t, "2048", res.Config.DeviceAttributes[0].Value)
+	assert.Equal(t, "active", res.Config.Subsystems[0].State)
+	assert.Equal(t, "appd", res.Config.Inittab[0].Identifier)
+
+	// No selector, no machine configs.
+	res, err = Render(Inputs{Pool: testPool(), ControllerConfig: testCC(), MachineConfigs: []*amcov1alpha1.AIXMachineConfig{base}})
+	require.NoError(t, err)
+	assert.Empty(t, res.Config.Tunables)
+}
+
+func TestRenderMachineConfigRejects(t *testing.T) {
+	for want, spec := range map[string]amcov1alpha1.AIXMachineConfigSpec{
+		"kernelUpdate is not yet supported": {KernelUpdate: &runtime.RawExtension{Raw: []byte(`{"level":"7300-03"}`)}},
+		"is reserved":                       {Files: []amcov1alpha1.FileSpec{{Path: "/etc/kubernetes/kubelet.conf", Contents: amcov1alpha1.FileContents{Inline: strPtr("x")}}}},
+		"exactly one of contents.inline":    {Files: []amcov1alpha1.FileSpec{{Path: "/etc/motd"}}},
+		"reserved (AMCO":                    {Files: []amcov1alpha1.FileSpec{{Path: "/etc/amco/force", Contents: amcov1alpha1.FileContents{Inline: strPtr("")}}}},
+		"not one of no, vmo":                {Tunables: []amcov1alpha1.TunableSpec{{Command: "bash", Name: "x", Value: intstr.FromInt32(1)}}},
+		"must be a decimal integer":         {Tunables: []amcov1alpha1.TunableSpec{{Command: "no", Name: "x", Value: intstr.FromString("1;reboot")}}},
+		"invalid device name":               {DeviceAttributes: []amcov1alpha1.DeviceAttributeSpec{{Device: "../x", Attribute: "a", Value: intstr.FromInt32(1)}}},
+		"cannot be managed":                 {Subsystems: []amcov1alpha1.SubsystemSpec{{Name: "amco-agent", State: "Inoperative"}}},
+		"invalid inittab identifier":        {Inittab: []amcov1alpha1.InittabSpec{{Identifier: "-x", RunLevel: "2", Action: "once", Command: "c"}}},
+	} {
+		_, err := Render(Inputs{Pool: selectingPool(), ControllerConfig: testCC(), MachineConfigs: []*amcov1alpha1.AIXMachineConfig{machineConfig("bad", spec)}})
+		assert.ErrorContains(t, err, want)
+		if err != nil {
+			assert.Contains(t, err.Error(), "AIXMachineConfig bad")
+		}
+	}
 }

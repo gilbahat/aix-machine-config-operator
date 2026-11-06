@@ -35,10 +35,11 @@ func renderCmd() *cobra.Command {
 		Short: "Render an AIX node configuration from YAML manifests (no cluster needed)",
 		Long: `Reads every *.yaml/*.yml/*.json file under --dir. Recognised kinds are
 ControllerConfig, Image, APIServer, ImageDigestMirrorSet, ImageTagMirrorSet,
-ContainerRuntimeConfig, KubeletConfig and AIXConfigPool; anything else is
-skipped. A ControllerConfig is required (oc get controllerconfig
+ContainerRuntimeConfig, KubeletConfig, AIXMachineConfig and AIXConfigPool;
+anything else is skipped. A ControllerConfig is required (oc get controllerconfig
 machine-config-controller -o yaml). If no AIXConfigPool named --pool is
-found, one is assumed with the label pools.amco.reuna-labs.io/<pool>: "".`,
+found, one is assumed with the label pools.amco.reuna-labs.io/<pool>: ""
+that selects AIXMachineConfigs labelled amco.reuna-labs.io/role: <pool>.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			in, err := loadInputs(dir, poolName)
 			if err != nil {
@@ -138,7 +139,12 @@ func loadInputs(dir, poolName string) (render.Inputs, error) {
 		f.Close()
 	}
 	if in.Pool == nil {
-		in.Pool = &amcov1alpha1.AIXConfigPool{ObjectMeta: metav1.ObjectMeta{Name: poolName, Labels: map[string]string{amcov1alpha1.PoolLabelPrefix + poolName: ""}}}
+		in.Pool = &amcov1alpha1.AIXConfigPool{
+			ObjectMeta: metav1.ObjectMeta{Name: poolName, Labels: map[string]string{amcov1alpha1.PoolLabelPrefix + poolName: ""}},
+			Spec: amcov1alpha1.AIXConfigPoolSpec{ConfigSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{amcov1alpha1.RoleLabel: poolName},
+			}},
+		}
 	}
 	return in, nil
 }
@@ -163,6 +169,8 @@ func addInput(in *render.Inputs, obj runtime.Object, poolName string) {
 		if o.Name == poolName {
 			in.Pool = o
 		}
+	case *amcov1alpha1.AIXMachineConfig:
+		in.MachineConfigs = append(in.MachineConfigs, o)
 	}
 }
 
