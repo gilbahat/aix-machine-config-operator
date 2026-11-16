@@ -1,6 +1,6 @@
 // Code in this file is copied from github.com/openshift/machine-config-operator
 // pkg/controller/container-runtime-config/helpers.go at commit
-// 0e2557038232d89cfbf810a6aabf85430d472211 (branch release-5.0),
+// 60d8931a610f5fb6c46bd7be086d3dd8cba34a19 (branch release-5.0),
 // licensed under the Apache License, Version 2.0. The functions are unexported
 // upstream, so they are copied here verbatim apart from being exported.
 // Keep them in sync when the MCO pin moves (see hack/check-upstream-copies.sh).

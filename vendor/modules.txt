@@ -551,7 +551,7 @@ github.com/openshift/library-go/pkg/operator/resource/resourceread
 github.com/openshift/library-go/pkg/operator/resourcesynccontroller
 github.com/openshift/library-go/pkg/operator/v1helpers
 github.com/openshift/library-go/pkg/pki
-# github.com/openshift/machine-config-operator v0.0.1-0.20261030182610-0e2557038232
+# github.com/openshift/machine-config-operator v0.0.1-0.20261116172834-60d8931a610f
 ## explicit; go 1.26.0
 github.com/openshift/machine-config-operator/internal/clients
 github.com/openshift/machine-config-operator/lib/resourceapply

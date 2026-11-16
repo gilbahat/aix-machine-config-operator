@@ -7,7 +7,7 @@ require (
 	github.com/imdario/mergo v0.3.16
 	github.com/openshift/api v0.0.0-20260829233811-31af9f93e31e
 	github.com/openshift/client-go v0.0.0-20260810202730-ddca5e0b7146
-	github.com/openshift/machine-config-operator v0.0.1-0.20261030182610-0e2557038232
+	github.com/openshift/machine-config-operator v0.0.1-0.20261116172834-60d8931a610f
 	github.com/openshift/runtime-utils v0.0.0-20230921210328-7bdb5b9c177b
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.12.1
